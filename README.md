@@ -1,4 +1,4 @@
-# Flashcards ENA — version 1.0.0
+# Flashcards — version 1.0.0
 
 Version stable, candidate à la mise en service. Elle reprend l'ensemble des lots 1 à 4 et les corrections de la v0.4.1, sans changement de fonctionnalité. L'historique des lots figure plus bas.
 
