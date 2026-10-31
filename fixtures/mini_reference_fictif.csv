@@ -1,0 +1,15 @@
+﻿"ID","Matière","Sous-catégorie","Notion","Type","Difficulté","Question","Réponse","Explication","Astuce / Piège"
+"FIC-001","Calcul","Fractions","Simplification","Connaissance","Facile","Comment simplifier 6/8 ?","Diviser par 2 : 3/4.","On divise numérateur et dénominateur par leur PGCD.","Chercher le PGCD."
+"FIC-002","Calcul","Fractions","Addition","Application","Moyen","Calcule 1/2 + 1/4.
+A) 3/4  B) 2/6  C) 1/8  D) 2/4  E) 1","A) 3/4","1/2 = 2/4, donc 2/4 + 1/4 = 3/4.","Mettre au même dénominateur."
+"FIC-003","Calcul","Pourcentages","Hausse","Piège","Difficile","Un prix augmente de 10 % puis baisse de 10 %. Variation ?
+A) 0 %
+B) −1 %
+C) +1 %
+D) −10 %","B) −1 %","1,1 × 0,9 = 0,99.","Les pourcentages successifs se multiplient."
+"FIC-004","Raisonnement","Suites","Suite arithmétique","Méthode","Facile","Quel nombre suit 2, 5, 8, 11 ?","14","On ajoute 3 à chaque terme.",""
+"FIC-005","Raisonnement","Logique","Négation","Connaissance","Moyen","Quelle est la négation de « tous les A sont B » ?
+A) Aucun A n’est B  B) Au moins un A n’est pas B  C) Tous les B sont A","B","La négation d’un « tous » est « il existe au moins un … qui ne … pas ».",""
+"FIC-006","Raisonnement","Logique","Négation","Piège","Difficile","Réponse incohérente (test d’ambiguïté)
+A) Oui  B) Non","C) Peut-être","Carte volontairement incohérente pour vérifier l’import prudent.",""
+"FIC-007","Raisonnement","","","Connaissance","Facile","Carte rattachée directement à la matière (sans thème).","Réponse fictive.","",""

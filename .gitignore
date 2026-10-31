@@ -1,0 +1,8 @@
+node_modules/
+dist/
+# Ne jamais publier de CSV réels ni de sauvegardes personnelles
+*.csv
+!fixtures/*.csv
+*.json.bak
+flashcards-sauvegarde-*.json
+data/
