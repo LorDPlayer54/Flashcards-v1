@@ -10,7 +10,9 @@ import { Home } from './screens/Home';
 import { Import } from './screens/Import';
 import { Labels } from './screens/Labels';
 import { Library } from './screens/Library';
+import { Guide } from './screens/Guide';
 import { More } from './screens/More';
+import { Program } from './screens/Program';
 import { ReviewSetup } from './screens/ReviewSetup';
 import { Restore } from './screens/Restore';
 import { Search } from './screens/Search';
@@ -137,10 +139,12 @@ function Screen() {
   else if (a === 'card' && b) screen = <CardDetail cardId={b} key={b} />;
   else if (a === 'search') screen = <Search />;
   else if (a === 'import') screen = <Import />;
-  else if (a === 'more') screen = <More />;
+  else if (a === 'more') screen = <More route={route} />;
+  else if (a === 'guide') screen = <Guide route={route} key={route.path.join('/')} />;
   else if (a === 'restore') screen = <Restore />;
   else if (a === 'stats') screen = <Stats route={route} key={route.query.toString()} />;
   else if (a === 'labels') screen = <Labels route={route} key={route.query.toString()} />;
+  else if (a === 'program') screen = <Program route={route} key={route.query.toString()} />;
   else if (a === 'review') screen = <ReviewSetup route={route} key={route.query.toString()} />;
   else if (a === 'test' && b === 'setup') screen = <TestSetup route={route} key={route.query.toString()} />;
   else if (a === 'test' && b === 'run' && c) {

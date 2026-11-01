@@ -1,4 +1,4 @@
-# Déploiement (version 1.0.0)
+# Déploiement (version 1.1.0)
 
 L'application est un site statique : un dossier `dist/` (HTML, JavaScript, CSS, icônes, manifeste, service worker) sans serveur applicatif ni base de données distante. Toutes les données restent dans le navigateur de l'utilisatrice.
 

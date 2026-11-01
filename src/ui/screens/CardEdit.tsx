@@ -7,8 +7,8 @@ import { contentChanged, contentFromForm, formFromCard, mcqAnswerText, OPTION_ID
 import { CardConflictError, createCard, getCard, getReviewState, MANUAL_COLLECTION_NAME, updateCard } from '../../storage/repo';
 import { breadcrumb, ROOT_ID } from '../../taxonomy/tree';
 import { useApp } from '../AppContext';
-import { ErrorNotice, errorMessage, Segmented, TopBar } from '../components/common';
-import { href, libraryHref, navigate } from '../router';
+import { ConfirmDialog, ErrorNotice, SavedNotice, errorMessage, Segmented, TopBar } from '../components/common';
+import { clearNavigationGuard, goBackTo, href, libraryHref, resumeNavigation, setNavigationGuard, type BlockedNavigation } from '../router';
 
 const DIFFICULTIES = ['Facile', 'Moyen', 'Difficile'];
 
@@ -31,6 +31,10 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
   const [saveError, setSaveError] = useState<{ message: string; conflict: boolean } | null>(null);
   const [savedId, setSavedId] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  /** Formulaire tel qu'affiché au chargement : sert à détecter les modifications non enregistrées */
+  const [initial, setInitial] = useState<string | null>(null);
+  /** Sortie en attente de confirmation : bouton Annuler/retour de l'écran, ou navigation interceptée (retour du navigateur, lien) */
+  const [askLeave, setAskLeave] = useState<false | 'cancel' | BlockedNavigation>(false);
 
   // Chargement (modification) ou préremplissage d'après le niveau consulté (ajout)
   useEffect(() => {
@@ -39,7 +43,9 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
     if (!editing) {
       const prefill: Record<string, string> = {};
       if (nodeId && nodeId !== ROOT_ID && tax.byId.has(nodeId)) for (const n of breadcrumb(tax, nodeId)) if (n.kind !== 'root') prefill[n.kind] = n.label;
-      setForm(formFromCard(undefined, prefill));
+      const f = formFromCard(undefined, prefill);
+      setForm(f);
+      setInitial(JSON.stringify(f));
       return;
     }
     Promise.all([getCard(db, cardId), getReviewState(db, cardId)])
@@ -47,7 +53,9 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
         if (!alive) return;
         setCard(c ?? null);
         setHasMemory(Boolean(st));
-        setForm(c ? formFromCard(c) : null);
+        const f = c ? formFromCard(c) : null;
+        setForm(f);
+        setInitial(f ? JSON.stringify(f) : null);
         setMemoryChoice('keep');
       })
       .catch((e: unknown) => alive && setLoadError(errorMessage(e)));
@@ -72,6 +80,19 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
   }, [metas, form?.matiere, form?.theme]);
 
   const back = editing ? href(`card/${encodeURIComponent(cardId)}`) : nodeId ? libraryHref(nodeId) : libraryHref(ROOT_ID);
+  /** Quitte l'édition sans écrire : retour naturel à la fiche (ou à la bibliothèque) qui a ouvert le formulaire, sans boucle */
+  const leave = (dest: string = back) => {
+    clearNavigationGuard();
+    goBackTo(dest, (prev) => prev === dest || prev.split('?')[0] === dest.split('?')[0]);
+  };
+  const dirty = form !== null && initial !== null && savedId === null && JSON.stringify(form) !== initial;
+  const cancel = () => (dirty ? setAskLeave('cancel') : leave());
+
+  // Formulaire modifié : retour du navigateur ou du téléphone, liens et barre de navigation demandent confirmation
+  useEffect(() => {
+    if (!dirty) return;
+    return setNavigationGuard(window.location.hash, (b) => setAskLeave(b));
+  }, [dirty]);
 
   if (loadError)
     return (
@@ -140,16 +161,17 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
       setSaveError({
         message:
           e instanceof CardConflictError
-            ? `${e.message} Vos modifications n'ont pas été enregistrées : rechargez la carte pour partir de sa version actuelle.`
-            : `La carte n'a pas été enregistrée (aucune donnée modifiée) : ${errorMessage(e)}. Vous pouvez réessayer.`,
+            ? `Cette carte a été modifiée ailleurs. Vos modifications n'ont pas été enregistrées : rechargez la carte pour accéder à sa dernière version (les changements saisis ici seront perdus).`
+            : `Enregistrement impossible. Aucune donnée n'a été modifiée (${errorMessage(e)}). Réessayez.`,
         conflict: e instanceof CardConflictError,
       });
       return;
     }
-    setSavedId(saved.cardId);
+    setSavedId(saved.cardId); // enregistré : le formulaire n'est plus considéré comme modifié
+    clearNavigationGuard();
     try {
       await reload();
-      navigate(`card/${encodeURIComponent(saved.cardId)}`, undefined, true);
+      leave(href(`card/${encodeURIComponent(saved.cardId)}`));
     } catch (e) {
       // La carte est enregistrée ; seule l'actualisation de la bibliothèque a échoué
       setBusy(false);
@@ -160,7 +182,7 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
   const retryRefresh = async () => {
     try {
       await reload();
-      navigate(`card/${encodeURIComponent(savedId!)}`, undefined, true);
+      leave(href(`card/${encodeURIComponent(savedId!)}`));
     } catch (e) {
       setRefreshError(errorMessage(e));
     }
@@ -216,21 +238,22 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
     return (
       <div className="page">
         <TopBar title={editing ? 'Modifier la carte' : 'Ajouter une carte'} back={back} />
-        <ErrorNotice
-          message={`La carte est enregistrée, mais la bibliothèque n'a pas pu être actualisée (${refreshError}).`}
-          onRetry={() => void retryRefresh()}
-          retryLabel="Actualiser"
-        />
-        <a className="btn secondary block" href={href(`card/${encodeURIComponent(savedId!)}`)}>
-          Voir la carte
-        </a>
+        <SavedNotice
+          title="Carte enregistrée"
+          message={`L'affichage de la bibliothèque n'a pas pu être actualisé (${refreshError}). La carte n'a pas besoin d'être enregistrée de nouveau.`}
+          onRefresh={() => void retryRefresh()}
+        >
+          <button type="button" className="btn secondary block" onClick={() => leave(href(`card/${encodeURIComponent(savedId!)}`))}>
+            Voir la carte
+          </button>
+        </SavedNotice>
       </div>
     );
   }
 
   return (
     <div className="page with-action-bar card-form">
-      <TopBar title={editing ? 'Modifier la carte' : 'Ajouter une carte'} back={back} />
+      <TopBar title={editing ? 'Modifier la carte' : 'Ajouter une carte'} back={cancel} backLabel="Annuler" />
 
       <section className="card-block">
         <h3 className="label">Classement</h3>
@@ -342,13 +365,6 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
         </section>
       )}
 
-      {editing && existing?.externalId && (
-        <p className="muted small">
-          Carte importée ({existing.externalId}) : une réimportation du fichier dans sa collection la signalera comme modifiée et vous proposera
-          d'appliquer la version du fichier.
-        </p>
-      )}
-
       {saveError && (
         <ErrorNotice
           message={saveError.message}
@@ -363,11 +379,32 @@ export function CardEdit({ cardId, nodeId }: { cardId?: string; nodeId?: string 
         </p>
       )}
 
-      <div className="action-bar">
-        <button type="button" className="btn primary block" onClick={() => void save()} disabled={busy || unchanged}>
-          {busy ? 'Enregistrement…' : unchanged ? 'Aucune modification' : editing ? 'Enregistrer les modifications' : 'Ajouter la carte'}
+      <div className="action-bar edit-actions">
+        <button type="button" className="btn secondary" onClick={cancel} disabled={busy}>
+          Annuler
+        </button>
+        <button type="button" className="btn primary" onClick={() => void save()} disabled={busy || unchanged}>
+          {busy ? 'Enregistrement…' : unchanged ? 'Aucune modification' : editing ? 'Enregistrer' : 'Ajouter la carte'}
         </button>
       </div>
+
+      {askLeave && (
+        <ConfirmDialog
+          title="Abandonner les modifications ?"
+          confirmLabel="Abandonner les modifications"
+          cancelLabel="Continuer l'édition"
+          danger
+          onConfirm={() => {
+            const pending = askLeave;
+            setAskLeave(false);
+            if (pending === 'cancel') leave();
+            else if (pending) resumeNavigation(pending);
+          }}
+          onCancel={() => setAskLeave(false)}
+        >
+          <p>Les changements saisis ne seront pas enregistrés. La carte, son historique et sa mémorisation restent inchangés.</p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }

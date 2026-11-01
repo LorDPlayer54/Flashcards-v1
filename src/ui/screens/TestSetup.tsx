@@ -2,7 +2,7 @@
 // Lot 1 : périmètre prérempli, format, nombre de questions, ordre.
 // Lot 3A : périmètre multiple modifiable, filtres de difficulté / type pédagogique / statut de maîtrise,
 // explication des résultats vides, correction immédiate ou en fin de test, chronomètre.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   UNSET,
   type CorrectionMode,
@@ -13,9 +13,9 @@ import {
   type TestConfig,
   type TestFilters,
 } from '../../domain/types';
-import { CORRECTION_PREF_KEY, parseCorrectionPref } from '../../settings/preferences';
+import { loadCorrectionPref } from '../../settings/preferences';
 import { getInProgressSessions, getSetting, setSetting, startTestSession } from '../../storage/repo';
-import { ROOT_ID } from '../../taxonomy/tree';
+import { pathKeyOf, ROOT_ID } from '../../taxonomy/tree';
 import {
   activeDimensions,
   applyTestFilters,
@@ -30,7 +30,8 @@ import {
 } from '../../tests/selection';
 import { createSession } from '../../tests/session';
 import { useApp } from '../AppContext';
-import { ChipGroup, confirmReplace, ErrorNotice, plural, Segmented, TopBar } from '../components/common';
+import { ChipGroup, confirmReplace, ErrorNotice, Icon, plural, Segmented, Switch, TopBar } from '../components/common';
+import { monogramOf, monogramsFor } from '../monogram';
 import { ScopePicker } from '../components/ScopePicker';
 import { libraryHref, navigate, type Route } from '../router';
 import { previewRefreshPhase, type LibraryReload } from '../previewRefresh';
@@ -41,6 +42,8 @@ type TimerChoice = 'off' | 'elapsed' | 'limit';
 type LimitChoice = '5' | '10' | '15' | '30' | 'custom';
 
 const LAST_CONFIG_KEY = 'lastTestConfig';
+/** Monogrammes visibles avant le bouton « +N » (maquette Test libre V3) */
+const CHIP_LIMIT = 5;
 
 function countChoiceOf(count: number | null): { choice: CountChoice; custom: string } {
   if (count === null) return { choice: 'all', custom: '15' };
@@ -71,6 +74,7 @@ export function TestSetup({ route }: { route: Route }) {
   const [custom, setCustom] = useState(countChoiceOf(pre ? pre.count : 20).custom);
   const [order, setOrder] = useState<OrderMode>(pre?.order ?? 'random');
   const [correction, setCorrection] = useState<CorrectionMode>(pre?.correction ?? 'immediate');
+  const correctionTouched = useRef(false);
   const [timerMode, setTimerMode] = useState<TimerChoice>(pre?.timer?.mode ?? 'off');
   const initialLimit = pre?.timer?.limitSec ? String(Math.round(pre.timer.limitSec / 60)) : '10';
   const [limitChoice, setLimitChoice] = useState<LimitChoice>(['5', '10', '15', '30'].includes(initialLimit) ? (initialLimit as LimitChoice) : 'custom');
@@ -92,18 +96,16 @@ export function TestSetup({ route }: { route: Route }) {
   useEffect(() => {
     if (pre) return;
     let alive = true;
-    Promise.all([getSetting<TestConfig | null>(db, LAST_CONFIG_KEY, null), getSetting<unknown>(db, CORRECTION_PREF_KEY, 'last').catch(() => 'last')])
-      .then(([last, prefRaw]) => {
+    Promise.all([getSetting<TestConfig | null>(db, LAST_CONFIG_KEY, null).catch(() => null), loadCorrectionPref(db).catch(() => 'immediate' as const)])
+      .then(([last, pref]) => {
         if (!alive) return;
-        // Lot 3B : la préférence de correction (Plus › Tests libres) l'emporte sur le dernier test, sauf « Comme le dernier test »
-        const pref = parseCorrectionPref(prefRaw);
-        if (pref !== 'last') setCorrection(pref);
+        // Switch V3 : la préférence explicite de Plus › Tests libres est toujours appliquée, jamais la correction du dernier test
+        if (!correctionTouched.current) setCorrection(pref);
         if (!last) return;
         const c = countChoiceOf(last.count);
         setCountChoice(c.choice);
         setCustom(c.custom);
         setOrder(last.order);
-        setCorrection(pref !== 'last' ? pref : (last.correction ?? 'immediate'));
         setTimerMode(last.timer?.mode ?? 'off');
         setLimitUsage(last.timer?.pausable ? 'training' : 'exam');
         if (last.timer?.limitSec) {
@@ -126,6 +128,20 @@ export function TestSetup({ route }: { route: Route }) {
   const nMcq = scoped.filter((m) => m.formatQuestion === 'mcq').length;
   const nOpen = scoped.length - nMcq;
   const advancedActive = filters.difficulties.length + filters.types.length + filters.statuses.length > 0;
+  // Refonte (Test libre V3) : matières et notions de la sélection, monogrammes cohérents avec la bibliothèque
+  const monos = useMemo(() => monogramsFor(tax.root.children.map((c) => c.label)), [tax]);
+  const subjects = useMemo(() => {
+    const set = new Set(scoped.map((m) => m.matiere));
+    const ordered = tax.root.children.map((c) => c.label).filter((l) => set.has(l));
+    return [...ordered, ...[...set].filter((l) => !ordered.includes(l))];
+  }, [scoped, tax]);
+  const notionCount = useMemo(() => new Set(scoped.map((m) => pathKeyOf(m))).size, [scoped]);
+  const [showAllSubjects, setShowAllSubjects] = useState(false);
+  const [lastTimerMode, setLastTimerMode] = useState<'elapsed' | 'limit'>(timerMode === 'limit' ? 'limit' : 'elapsed');
+  useEffect(() => {
+    if (timerMode !== 'off') setLastTimerMode(timerMode);
+  }, [timerMode]);
+  const isRootScope = scope?.kind === 'node' && scope.nodeId === ROOT_ID;
 
   const requested: number | null =
     countChoice === 'all' ? null : countChoice === 'custom' ? Math.max(1, Math.floor(Number(custom) || 0)) : Number(countChoice);
@@ -134,7 +150,9 @@ export function TestSetup({ route }: { route: Route }) {
   const limitMinutes = limitChoice === 'custom' ? Number(limitCustom) : Number(limitChoice);
   const limitInvalid = timerMode === 'limit' && !(limitMinutes >= 1 && limitMinutes <= 600);
 
-  const back = scope?.kind === 'node' ? libraryHref(scope.nodeId) : () => window.history.back();
+  const fromHome = scope?.kind === 'node' && scope.nodeId === ROOT_ID && !route.query.get('from');
+  const back = fromHome ? '#/' : scope?.kind === 'node' ? libraryHref(scope.nodeId) : () => window.history.back();
+  const backLabel = fromHome ? 'Accueil' : scope?.kind === 'node' ? 'Bibliothèque' : 'Retour';
 
   if (!scope) {
     return (
@@ -248,204 +266,96 @@ export function TestSetup({ route }: { route: Route }) {
 
   const diffLabel = (v: string) => (v === UNSET ? 'Non renseignée' : v);
   const typeLabel = (v: string) => (v === UNSET ? 'Non renseigné' : v);
+  const timerOn = timerMode !== 'off';
+  const formatSummary = format === 'all' ? 'QCM et ouvertes' : format === 'mcq' ? 'QCM' : 'Questions ouvertes';
+  const timerSummary =
+    timerMode === 'off'
+      ? 'Sans chronomètre'
+      : timerMode === 'elapsed'
+        ? 'Temps écoulé'
+        : `${limitInvalid ? '?' : limitMinutes} min · ${limitUsage === 'exam' ? 'Examen' : 'Entraînement'}`;
+  const shownSubjects = subjects.slice(0, CHIP_LIMIT);
+  const hiddenCount = subjects.length - shownSubjects.length;
+
+  if (metas.length === 0) {
+    return (
+      <div className="page">
+        <TopBar title="Test libre" back={back} backLabel={backLabel} lead="Entraînez-vous sur les cartes de votre choix." />
+        <section className="card-block empty-panel">
+          <h2 className="section-title">Votre bibliothèque est vide</h2>
+          <p className="muted">Importez vos premières cartes pour préparer un test libre.</p>
+          <a className="btn secondary block" href="#/import">
+            Accéder à l'import
+          </a>
+        </section>
+      </div>
+    );
+  }
 
   return (
-    <div className="page with-action-bar">
-      <TopBar title="Lancer un test" back={back} />
+    <div className="page with-action-bar test-setup">
+      <TopBar title="Test libre" back={back} backLabel={backLabel} lead="Entraînez-vous sur les cartes de votre choix." />
 
-      <section className="card-block">
-        <p className="eyebrow">Périmètre</p>
-        <p className="strong break">{scopeLabel}</p>
-        <p className="muted">
-          {plural(scoped.length, 'carte', 'cartes')} · {nMcq} QCM · {nOpen} ouvertes
-        </p>
+      <div className="section-top">
+        <h2>Votre sélection</h2>
         {scope.kind !== 'cards' && (
-          <button type="button" className="btn secondary block" onClick={() => setPicking(true)}>
-            Modifier le périmètre (plusieurs matières ou thèmes possibles)
+          <button type="button" className="link-btn" onClick={() => setPicking(true)}>
+            Modifier
+            <Icon name="arrow" />
           </button>
         )}
-      </section>
-
-      <section className="field">
-        <h3 className="label">Format</h3>
-        <Segmented
-          label="Format"
-          value={format}
-          onChange={setFormat}
-          options={[
-            { value: 'all', label: `Mélange (${scoped.length})` },
-            { value: 'mcq', label: `QCM (${nMcq})` },
-            { value: 'open', label: `Ouvertes (${nOpen})` },
-          ]}
-        />
-      </section>
-
-      <details className="advanced field" open={advancedActive}>
-        <summary>
-          Filtres : difficulté, type, statut
-          {advancedActive &&
-            (() => {
-              const n = activeDimensions(filterSet).filter((d) => d !== 'format').length;
-              return ` (${n} ${n > 1 ? 'actifs' : 'actif'})`;
-            })()}
-        </summary>
-        <p className="muted small">Plusieurs choix d'un même filtre s'additionnent ; des filtres différents se cumulent. Aucun choix = pas de filtre.</p>
-        <h4 className="label">Difficulté</h4>
-        <ChipGroup
-          label="Difficulté"
-          options={options.difficulties.map((o) => ({ value: o.value, label: diffLabel(o.value), count: o.count }))}
-          selected={filters.difficulties}
-          onToggle={(v) => toggle('difficulties', v)}
-        />
-        <h4 className="label">Type pédagogique</h4>
-        <ChipGroup
-          label="Type pédagogique"
-          options={options.types.map((o) => ({ value: o.value, label: typeLabel(o.value), count: o.count }))}
-          selected={filters.types}
-          onToggle={(v) => toggle('types', v)}
-        />
-        <h4 className="label">Statut de maîtrise</h4>
-        {options.statuses ? (
-          <ChipGroup<MasteryBucket>
-            label="Statut de maîtrise"
-            options={options.statuses.map((o) => ({ value: o.value, label: MASTERY_LABELS[o.value], count: o.count }))}
-            selected={filters.statuses}
-            onToggle={(v) => toggle('statuses', v)}
-          />
-        ) : statesStatus === 'error' ? (
-          <ErrorNotice
-            message={`Les statuts de maîtrise n'ont pas pu être lus (${review.error}). Ce filtre est indisponible ; les autres restent utilisables.`}
-            onRetry={review.reload}
-          />
-        ) : (
-          <p className="muted small" role="status">
-            Chargement des statuts de maîtrise…
-          </p>
-        )}
-        {advancedActive && (
-          <button type="button" className="btn ghost block" onClick={() => setFilters(NO_FILTERS)}>
-            Retirer ces filtres
-          </button>
-        )}
-      </details>
-
-      <section className="field">
-        <h3 className="label">Nombre de questions</h3>
-        <Segmented
-          label="Nombre de questions"
-          value={countChoice}
-          onChange={setCountChoice}
-          options={[
-            { value: '10', label: '10' },
-            { value: '20', label: '20' },
-            { value: '30', label: '30' },
-            { value: 'all', label: 'Toutes' },
-            { value: 'custom', label: 'Autre' },
-          ]}
-        />
-        {countChoice === 'custom' && (
-          <input
-            className="input"
-            type="number"
-            inputMode="numeric"
-            min={1}
-            value={custom}
-            onChange={(e) => setCustom(e.target.value)}
-            aria-label="Nombre de questions personnalisé"
-          />
-        )}
-      </section>
-
-      <section className="field">
-        <h3 className="label">Ordre</h3>
-        <Segmented
-          label="Ordre"
-          value={order}
-          onChange={setOrder}
-          options={[
-            { value: 'random', label: 'Aléatoire' },
-            { value: 'library', label: 'Ordre de la bibliothèque' },
-          ]}
-        />
-      </section>
-
-      <section className="field">
-        <h3 className="label">Correction</h3>
-        <Segmented
-          label="Correction"
-          value={correction}
-          onChange={setCorrection}
-          options={[
-            { value: 'immediate', label: 'Après chaque question' },
-            { value: 'end', label: 'En fin de test' },
-          ]}
-        />
-        {correction === 'end' && (
-          <p className="muted small">Les réponses des QCM sont enregistrées sans être corrigées ; les questions ouvertes s'autoévaluent à la fin.</p>
-        )}
-      </section>
-
-      <section className="field">
-        <h3 className="label">Chronomètre</h3>
-        <Segmented
-          label="Chronomètre"
-          value={timerMode}
-          onChange={setTimerMode}
-          options={[
-            { value: 'off', label: 'Aucun' },
-            { value: 'elapsed', label: 'Temps écoulé' },
-            { value: 'limit', label: 'Temps limité' },
-          ]}
-        />
-        {timerMode === 'elapsed' && <p className="muted small">Vous pourrez mettre le test en pause ; seul le temps où l'application est affichée est compté.</p>}
-        {timerMode === 'limit' && (
-          <>
-            <Segmented
-              label="Durée maximale"
-              value={limitChoice}
-              onChange={setLimitChoice}
-              options={[
-                { value: '5', label: '5 min' },
-                { value: '10', label: '10 min' },
-                { value: '15', label: '15 min' },
-                { value: '30', label: '30 min' },
-                { value: 'custom', label: 'Autre' },
-              ]}
-            />
-            {limitChoice === 'custom' && (
-              <input
-                className="input"
-                type="number"
-                inputMode="numeric"
-                min={1}
-                max={600}
-                value={limitCustom}
-                onChange={(e) => setLimitCustom(e.target.value)}
-                aria-label="Durée maximale en minutes"
-              />
+      </div>
+      <section className="scope-card" aria-live="polite">
+        <p className="scope-eyebrow">Cartes pour votre test</p>
+        <p className="scope-figure">
+          <strong className={eligible.length === 0 ? 'scope-number empty' : 'scope-number'}>{eligible.length}</strong>
+          <span className="scope-unit">{eligible.length > 1 ? 'cartes disponibles' : 'carte disponible'}</span>
+        </p>
+        {!isRootScope && <p className="scope-label break">{scopeLabel}</p>}
+        <p className="scope-meta">
+          <span>
+            <b>{subjects.length}</b> {subjects.length > 1 ? 'matières' : 'matière'}
+          </span>
+          <span>
+            <b>{notionCount}</b> {notionCount > 1 ? 'notions' : 'notion'}
+          </span>
+          {eligible.length < scoped.length && !statesUnavailable && (
+            <span>
+              <b>{scoped.length}</b> dans la sélection
+            </span>
+          )}
+        </p>
+        {subjects.length > 0 && (
+          <div className="monowrap">
+            {shownSubjects.map((m) => (
+              <span key={m} className="mono-chip" title={m}>
+                <span aria-hidden="true">{monos.get(m) ?? monogramOf(m)}</span>
+                <span className="sr-only">{m}</span>
+              </span>
+            ))}
+            {hiddenCount > 0 && (
+              <button
+                type="button"
+                className="mono-chip more"
+                aria-expanded={showAllSubjects}
+                aria-controls="scope-subjects"
+                aria-label={showAllSubjects ? 'Masquer les matières' : `Afficher les ${subjects.length} matières`}
+                onClick={() => setShowAllSubjects((v) => !v)}
+              >
+                +{hiddenCount}
+              </button>
             )}
-            <Segmented
-              label="Usage du temps limité"
-              value={limitUsage}
-              onChange={setLimitUsage}
-              options={[
-                { value: 'training', label: 'Entraînement (pause possible)' },
-                { value: 'exam', label: "Simulation d'examen" },
-              ]}
-            />
-            <p className="muted small">
-              {limitUsage === 'exam'
-                ? "Simulation d'examen : pas de pause ; le compte à rebours continue même si l'application est fermée ou le téléphone verrouillé."
-                : "Entraînement : vous pouvez mettre le test en pause (la question est alors masquée). Hors pause, le compte à rebours continue même application fermée."}{' '}
-              À la fin du temps, le test s'arrête ; les questions restantes sont comptées comme non traitées.
-            </p>
-          </>
+          </div>
         )}
-      </section>
-
-      <section className="card-block summary-line" aria-live="polite">
+        {showAllSubjects && (
+          <ul id="scope-subjects" className="subject-reveal">
+            {subjects.map((m) => (
+              <li key={m}>{m}</li>
+            ))}
+          </ul>
+        )}
         {statesUnavailable ? (
-          <>
+          <div className="scope-problem">
             <p className="notice" role="status">
               {statesStatus === 'error'
                 ? 'Les statuts de maîtrise sont illisibles : impossible de sélectionner les cartes selon ce critère.'
@@ -454,34 +364,264 @@ export function TestSetup({ route }: { route: Route }) {
             <button type="button" className="btn secondary block" onClick={() => setFilters((f) => ({ ...f, statuses: [] }))}>
               Retirer le filtre « statut de maîtrise »
             </button>
-          </>
-        ) : eligible.length === 0 ? (
-          <>
-            <p className="notice error">{emptyReason}</p>
-            {culprits.length > 0 && (
-              <div className="culprit-list">
-                {culprits.map((c) => (
-                  <button key={c.dimension} type="button" className="btn secondary block" onClick={() => clearDimension(c.dimension)}>
-                    Retirer le filtre « {c.label} » ({plural(c.countWithout, 'carte', 'cartes')})
-                  </button>
-                ))}
-              </div>
-            )}
-          </>
+          </div>
         ) : (
-          <>
-            <p>
-              <strong>{plural(eligible.length, 'carte éligible', 'cartes éligibles')}</strong>
-              {eligible.length < scoped.length && <span className="muted"> sur {scoped.length} dans le périmètre</span>}
-            </p>
-            {requested !== null && requested > eligible.length && (
-              <p className="notice">
-                Vous avez demandé {requested} questions mais seules {eligible.length} sont disponibles : le test en contiendra {eligible.length}.
-              </p>
-            )}
-            <p className="muted">Ce test libre ne modifie aucune échéance de révision.</p>
-          </>
+          eligible.length === 0 && (
+            <div className="scope-problem">
+              <p className="notice error">{emptyReason}</p>
+              {culprits.length > 0 && (
+                <div className="culprit-list">
+                  {culprits.map((c) => (
+                    <button key={c.dimension} type="button" className="btn secondary block" onClick={() => clearDimension(c.dimension)}>
+                      Retirer le filtre « {c.label} » ({plural(c.countWithout, 'carte', 'cartes')})
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
         )}
+      </section>
+
+      <div className="section-top">
+        <h2>Type de questions</h2>
+      </div>
+      <div className="seg-grid cols-3">
+        <Segmented
+          label="Type de questions"
+          value={format}
+          onChange={setFormat}
+          options={[
+            { value: 'all', label: 'Mélange' },
+            { value: 'mcq', label: 'QCM', disabled: nMcq === 0 && format !== 'mcq' },
+            { value: 'open', label: 'Ouvertes', disabled: nOpen === 0 && format !== 'open' },
+          ]}
+        />
+      </div>
+
+      <div className="section-top">
+        <h2>Nombre de cartes</h2>
+      </div>
+      <div className="seg-grid cols-4">
+        <Segmented
+          label="Nombre de cartes"
+          value={countChoice}
+          onChange={setCountChoice}
+          options={[
+            { value: '10', label: '10' },
+            { value: '20', label: '20' },
+            { value: '30', label: '30' },
+            { value: 'all', label: 'Toutes' },
+          ]}
+        />
+      </div>
+      <div className={countChoice === 'custom' ? 'custom-row selected' : 'custom-row'}>
+        <label htmlFor="custom-count">Choisir un autre nombre</label>
+        <input
+          id="custom-count"
+          className="input"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          value={custom}
+          aria-invalid={customInvalid}
+          onFocus={() => setCountChoice('custom')}
+          onChange={(e) => {
+            setCountChoice('custom');
+            setCustom(e.target.value);
+          }}
+        />
+      </div>
+      <p className="help">
+        {customInvalid
+          ? 'Indiquez un nombre de cartes supérieur ou égal à 1.'
+          : eligible.length === 0
+            ? 'Aucune carte disponible avec ces choix.'
+            : `${plural(finalCount, 'carte prévue', 'cartes prévues')} pour cette séance.`}
+      </p>
+      {requested !== null && requested > eligible.length && eligible.length > 0 && (
+        <p className="notice slim">
+          Vous avez demandé {requested} questions mais seules {eligible.length} sont disponibles : le test en contiendra {eligible.length}.
+        </p>
+      )}
+
+      <div className="section-top">
+        <h2>Chronomètre</h2>
+      </div>
+      <div className="setting-line">
+        <div>
+          <b>Activer le chronomètre</b>
+          <small>Suivre le temps ou fixer une limite</small>
+        </div>
+        <Switch label="Activer le chronomètre" checked={timerOn} onChange={(on) => setTimerMode(on ? lastTimerMode : 'off')} />
+      </div>
+      {timerOn && (
+        <div className="time-reveal">
+          <h3 className="sub-label">Mode de chronométrage</h3>
+          <div className="seg-grid cols-2">
+            <Segmented
+              label="Mode de chronométrage"
+              value={timerMode}
+              onChange={setTimerMode}
+              options={[
+                { value: 'elapsed', label: 'Temps écoulé' },
+                { value: 'limit', label: 'Temps limité' },
+              ]}
+            />
+          </div>
+          {timerMode === 'elapsed' && <p className="help">Vous pourrez mettre le test en pause ; seul le temps où l'application est affichée est compté.</p>}
+          {timerMode === 'limit' && (
+            <>
+              <h3 className="sub-label">Durée du test</h3>
+              <div className="seg-grid cols-5">
+                <Segmented
+                  label="Durée du test"
+                  value={limitChoice}
+                  onChange={setLimitChoice}
+                  options={[
+                    { value: '5', label: '5 min' },
+                    { value: '10', label: '10 min' },
+                    { value: '15', label: '15 min' },
+                    { value: '30', label: '30 min' },
+                    { value: 'custom', label: 'Autre' },
+                  ]}
+                />
+              </div>
+              {limitChoice === 'custom' && (
+                <div className="custom-row selected">
+                  <label htmlFor="custom-duration">Durée en minutes</label>
+                  <input
+                    id="custom-duration"
+                    className="input"
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={600}
+                    value={limitCustom}
+                    aria-invalid={limitInvalid}
+                    onChange={(e) => setLimitCustom(e.target.value)}
+                  />
+                </div>
+              )}
+              <h3 className="sub-label">Conditions du test</h3>
+              <div className="seg-grid cols-2">
+                <Segmented
+                  label="Conditions du test"
+                  value={limitUsage}
+                  onChange={setLimitUsage}
+                  options={[
+                    { value: 'training', label: 'Entraînement (pause possible)' },
+                    { value: 'exam', label: "Simulation d'examen" },
+                  ]}
+                />
+              </div>
+              <p className="help">
+                {limitUsage === 'exam'
+                  ? "Temps continu, aucune pause pendant l'épreuve : le compte à rebours continue même si l'application est fermée ou le téléphone verrouillé."
+                  : 'Le temps s’arrête pendant la pause (la question est alors masquée). Hors pause, le compte à rebours continue même application fermée.'}{' '}
+                À la fin du temps, le test s'arrête ; les questions restantes sont comptées comme non traitées.
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
+      <div className="section-top">
+        <h2>Déroulement</h2>
+      </div>
+      <div className="setting-line">
+        <div>
+          <b>Ordre aléatoire</b>
+          <small>{order === 'random' ? 'Mélanger les questions' : 'Questions dans l’ordre de la bibliothèque'}</small>
+        </div>
+        <Switch label="Ordre aléatoire" checked={order === 'random'} onChange={(on) => setOrder(on ? 'random' : 'library')} />
+      </div>
+      <div className="correction-setting">
+        <b>Correction des réponses</b>
+        <small>Choisissez quand voir les bonnes réponses.</small>
+        <div className="seg-grid cols-2">
+          <Segmented
+            label="Correction des réponses"
+            value={correction}
+            onChange={(v) => {
+              correctionTouched.current = true; // choix ponctuel pour ce test, la préférence de Plus ne change pas
+              setCorrection(v);
+            }}
+            options={[
+              { value: 'immediate', label: 'Après chaque question' },
+              { value: 'end', label: 'À la fin du test' },
+            ]}
+          />
+        </div>
+        {correction === 'end' && (
+          <p className="help">Les réponses des QCM sont enregistrées sans être corrigées ; les questions ouvertes s'autoévaluent à la fin.</p>
+        )}
+      </div>
+
+      <details className="advanced-filters" open={advancedActive}>
+        <summary>
+          <span>
+            <b>
+              Filtres avancés
+              {advancedActive &&
+                (() => {
+                  const n = activeDimensions(filterSet).filter((d) => d !== 'format').length;
+                  return ` (${n} ${n > 1 ? 'actifs' : 'actif'})`;
+                })()}
+            </b>
+            <small>Difficulté, type pédagogique et maîtrise</small>
+          </span>
+          <Icon name="chevron" />
+        </summary>
+        <div className="facets">
+          <p className="help">Plusieurs choix d'un même filtre s'additionnent ; des filtres différents se cumulent. Aucun choix = pas de filtre.</p>
+          <h4 className="sub-label">Difficulté</h4>
+          <ChipGroup
+            label="Difficulté"
+            options={options.difficulties.map((o) => ({ value: o.value, label: diffLabel(o.value), count: o.count }))}
+            selected={filters.difficulties}
+            onToggle={(v) => toggle('difficulties', v)}
+          />
+          <h4 className="sub-label">Type pédagogique</h4>
+          <ChipGroup
+            label="Type pédagogique"
+            options={options.types.map((o) => ({ value: o.value, label: typeLabel(o.value), count: o.count }))}
+            selected={filters.types}
+            onToggle={(v) => toggle('types', v)}
+          />
+          <h4 className="sub-label">Statut de maîtrise</h4>
+          {options.statuses ? (
+            <ChipGroup<MasteryBucket>
+              label="Statut de maîtrise"
+              options={options.statuses.map((o) => ({ value: o.value, label: MASTERY_LABELS[o.value], count: o.count }))}
+              selected={filters.statuses}
+              onToggle={(v) => toggle('statuses', v)}
+            />
+          ) : statesStatus === 'error' ? (
+            <ErrorNotice
+              message={`Les statuts de maîtrise n'ont pas pu être lus (${review.error}). Ce filtre est indisponible ; les autres restent utilisables.`}
+              onRetry={review.reload}
+            />
+          ) : (
+            <p className="muted small" role="status">
+              Chargement des statuts de maîtrise…
+            </p>
+          )}
+          {advancedActive && (
+            <button type="button" className="btn ghost block" onClick={() => setFilters(NO_FILTERS)}>
+              Retirer ces filtres
+            </button>
+          )}
+        </div>
+      </details>
+
+      <section className="summary-inline" aria-label="Résumé des réglages">
+        <span className="summary-label">Votre séance</span>
+        <span>
+          <strong>{plural(eligible.length === 0 ? 0 : finalCount, 'carte', 'cartes')}</strong> · {formatSummary} · {timerSummary} ·{' '}
+          {correction === 'end' ? 'Correction à la fin' : 'Correction immédiate'}
+        </span>
+        <span>Vos réponses mettent à jour la mémorisation des cartes, selon leur échéance.</span>
       </section>
 
       {startError && <ErrorNotice message={startError} />}
@@ -503,11 +643,17 @@ export function TestSetup({ route }: { route: Route }) {
       <div className="action-bar">
         <button
           type="button"
-          className="btn primary block"
+          className="btn primary block start-test"
           disabled={eligible.length === 0 || customInvalid || limitInvalid || busy || refreshPending}
           onClick={() => void start()}
         >
-          {busy ? 'Préparation…' : `Commencer (${finalCount} ${finalCount > 1 ? 'questions' : 'question'})`}
+          <span>{busy ? 'Préparation…' : 'Commencer le test'}</span>
+          {!busy && (
+            <span className="start-count">
+              {plural(eligible.length === 0 ? 0 : finalCount, 'carte', 'cartes')}
+              <Icon name="arrow" />
+            </span>
+          )}
         </button>
       </div>
     </div>

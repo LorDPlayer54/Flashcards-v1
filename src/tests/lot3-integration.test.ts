@@ -20,6 +20,7 @@ import { applyTestFilters, NO_FILTERS, resolveScope } from './selection';
 import { advance, createSession, currentCardId, gradeMcq, isRepeatPosition, pauseSession, rateMcq, recordAnswer, resumeSession, selfEvaluate } from './session';
 import { SessionController } from './sessionController';
 import { applyUserTransition, enforceTimeLimit, timeLeft, type TimeSource } from './timeLimit';
+import { startReviewAllStudied } from './studyAll';
 
 const D0 = '2026-11-02';
 const T0 = Date.parse(`${D0}T09:00:00.000Z`);
@@ -60,7 +61,7 @@ async function runRevision(db: DB, nodeId: string, plan: Record<string, { first:
   const states = await repo.loadReviewStates(db);
   const remaining = newRemainingToday(await repo.countIntroducedOn(db, D0), await repo.getNewPerDay(db));
   const preview = planReview(resolveScope({ kind: 'node', nodeId }, buildTaxonomy(metas), metas), states, D0, remaining);
-  const res = await repo.startReviewSession(db, { nodeId, scopeLabel: 'Calcul', expectedQueue: preview.queue, confirmedReplace: [], today: D0, now });
+  const res = await startReviewAllStudied(db, { nodeId, scopeLabel: 'Calcul', expectedQueue: preview.queue, confirmedReplace: [], today: D0, now });
   if (res.status !== 'started') throw new Error(res.status);
   const cards = Object.fromEntries((await db.getAll('cards')).map((c) => [c.cardId, c]));
   const ctl = new SessionController(res.session, (x) => repo.saveRevisionTransition(db, x, D0, now));

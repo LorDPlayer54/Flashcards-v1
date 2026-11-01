@@ -10,7 +10,7 @@ import { nodeIdFor, ROOT_ID } from '../taxonomy/tree';
 import { advance, createSession, recordAnswer, selfEvaluate, withDeadline, pauseSession } from '../tests/session';
 import { SessionController } from '../tests/sessionController';
 import { backupChecksum, BACKUP_FORMAT, countsOf, parseBackup, withBackupMark, type BackupData } from './archive';
-import { buildBackup, readAllData } from './export';
+import { backupFileName, buildBackup, customBackupName, readAllData } from './export';
 import { restoreBackup, RestoreVerificationError } from './restore';
 
 const D = '2026-11-02';
@@ -311,4 +311,19 @@ describe('volume', () => {
     expect(await fresh.count('reviewLog')).toBe(20_000);
     console.log(`Volume : ${(t.length / 1e6).toFixed(1)} Mo, export + validation + restauration en ${Math.round(ms)} ms (IndexedDB simulée)`);
   }, 120_000);
+});
+
+describe('nom du fichier de sauvegarde (refonte Plus V2)', () => {
+  const now = new Date(2026, 10, 4, 9, 5);
+  it('nom par défaut inchangé', () => {
+    expect(backupFileName(now)).toBe('flashcards-sauvegarde-2026-11-04-0905.json');
+  });
+  it('nom personnalisé, date facultative, extension unique', () => {
+    expect(customBackupName('Révisions ENA', true, now)).toBe('Revisions ENA-2026-11-04-0905.json');
+    expect(customBackupName('Sœur ①', false, now)).toBe('Soeur.json');
+    expect(customBackupName('mon/fichier:test.JSON', false, now)).toBe('mon-fichier-test.json');
+    expect(customBackupName('copie.json.json', false, now)).toBe('copie.json');
+    expect(customBackupName('   ', false, now)).toBe('flashcards-sauvegarde.json');
+    expect(customBackupName('..', true, now)).toBe('flashcards-sauvegarde-2026-11-04-0905.json');
+  });
 });

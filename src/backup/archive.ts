@@ -15,6 +15,7 @@
 //    de la migration v2 (la carte est conservée) ;
 //  - les états de mémorisation sans carte correspondante (incohérence impossible en usage normal) sont écartés et
 //    SIGNALÉS avec leur nombre : aucune donnée n'est écartée sans être annoncée.
+import { STUDIED_KEY, studiedValueError } from '../program/studied';
 import type { Card, Collection, TestSession } from '../domain/types';
 import { fnv1a } from '../domain/text';
 import { computeContentHash } from '../imports/buildCards';
@@ -98,7 +99,7 @@ export function parseBackup(text: string, supportedVersion: number = BACKUP_VERS
   } catch {
     return { ok: false, errors: ['Le fichier est illisible ou incomplet (JSON invalide). Il a peut-être été tronqué pendant le transfert.'] };
   }
-  if (!isObj(raw) || raw.format !== BACKUP_FORMAT) return { ok: false, errors: ["Ce fichier n'est pas une sauvegarde Flashcards ENA."] };
+  if (!isObj(raw) || raw.format !== BACKUP_FORMAT) return { ok: false, errors: ["Ce fichier n'est pas une sauvegarde Flashcard."] };
   const version = raw.version;
   if (!isNum(version) || !Number.isInteger(version) || version < 1) return { ok: false, errors: ['Version de sauvegarde absente ou invalide.'] };
   if (version > supportedVersion) {
@@ -244,6 +245,11 @@ export function parseBackup(text: string, supportedVersion: number = BACKUP_VERS
   input.settings.forEach((r, i) => {
     if (!isObj(r) || !isNonEmpty(r.key) || !('value' in r)) return err(`Paramètre n° ${i + 1} invalide.`);
     if (keys.has(r.key)) return err(`Paramètre en double : ${r.key}.`);
+    // v1.1.0 : programme étudié (absent des sauvegardes antérieures : il est alors déduit de l'historique)
+    if (r.key === STUDIED_KEY) {
+      const e = studiedValueError(r.value);
+      if (e) return err(e);
+    }
     keys.add(r.key);
     settings.push({ key: r.key, value: r.value });
   });

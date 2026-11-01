@@ -37,7 +37,21 @@ export interface ReviewState {
   lastReviewedDay: string;
   /** Prochaine échéance, date locale AAAA-MM-JJ */
   dueDay: string;
+  /**
+   * Tests libres (v1.2) : 'libre' si la dernière évaluation effective vient d'un test libre ; absent pour la
+   * révision programmée (et pour les états antérieurs).
+   */
+  lastSource?: 'libre';
+  /**
+   * Tests libres (v1.2) : état AVANT la première évaluation effective du jour `lastReviewedDay` (null : carte
+   * nouvelle). Sert à remplacer, le même jour, une évaluation par une autre plus informative (révision après test
+   * libre) ou plus défavorable, sans cumuler deux progressions. Absent pour les états antérieurs.
+   */
+  dayBase?: DayBase | null;
 }
+
+/** Copie d'un état de mémorisation, sans identifiant ni base du jour */
+export type DayBase = Omit<ReviewState, 'cardId' | 'dayBase'>;
 
 // ---------- Dates locales ----------
 
@@ -106,6 +120,89 @@ export function applyRating(prev: ReviewState | undefined, cardId: string, ratin
   }
 }
 
+// ---------- Tests libres et évaluations du même jour (v1.2) ----------
+//
+// Révision programmée : règles ci-dessus, inchangées (applyRating). Seule exception : si la carte a déjà reçu
+// aujourd'hui une évaluation effective en test libre, l'évaluation de révision la REMPLACE (calcul à partir de
+// l'état d'avant cette évaluation) au lieu de s'y ajouter.
+//
+// Test libre (applyFreeTest) :
+//  - échec (QCM faux = « À revoir », question ouverte « À revoir » ou « Difficile ») : règle de révision
+//    correspondante, quelle que soit l'échéance ;
+//  - question ouverte « Correct » ou « Facile » : règle de révision correspondante si la carte est dans sa
+//    fenêtre d'échéance (voir inDueWindow), sinon sans effet ;
+//  - QCM juste : règle « Correct » si la carte est due (échéance atteinte ou dépassée), sinon sans effet ;
+//  - carte nouvelle : un échec la fait entrer en apprentissage (J+1) ; une première réussite (QCM juste, « Correct »
+//    ou « Facile ») donne J+3 et compte comme première réussite de la série : chaque réussite suivante, faite au bon
+//    moment, monte d'un palier (QCM juste : 3 → 7 → 14 → 30 → 60 jours, comme « Correct ») ;
+//  - une seule évaluation effective par carte et par jour : une nouvelle évaluation du même jour n'est prise en
+//    compte que si elle est plus défavorable, et elle remplace alors la précédente.
+// Une évaluation « sans effet » ne modifie rien (ni état, ni historique).
+
+const RANK: Record<Rating, number> = { again: 0, hard: 1, good: 2, easy: 2 };
+
+/** Signal d'une réponse de test libre */
+export type FreeSignal = { kind: 'mcq'; correct: boolean } | { kind: 'open'; rating: Rating };
+
+/**
+ * Fenêtre d'échéance : la carte est due, en retard, ou dans le dernier quart de son intervalle
+ * (1 à 3 j : l'échéance ; 7 j : 1 jour avant ; 14 j : 3 ; 30 j : 7 ; 60 j : 15 ; 120 j : 30).
+ */
+export function inDueWindow(state: Pick<ReviewState, 'dueDay' | 'intervalDays'>, today: string): boolean {
+  return today >= addDays(state.dueDay, -Math.floor(Math.max(0, state.intervalDays) / 4));
+}
+
+function snapshot(s: ReviewState): DayBase {
+  const { cardId: _id, dayBase: _base, ...rest } = s;
+  return rest;
+}
+
+function fromBase(base: DayBase | null | undefined, cardId: string): ReviewState | undefined {
+  return base ? { ...base, cardId } : undefined;
+}
+
+/** Ajoute la base du jour et la source ; aucune propriété indéfinie (sauvegarde JSON fidèle). */
+function finish(next: ReviewState, base: DayBase | null, source: 'revision' | 'libre'): ReviewState {
+  const { lastSource: _s, dayBase: _b, ...rest } = next;
+  return source === 'libre' ? { ...rest, lastSource: 'libre', dayBase: base } : { ...rest, dayBase: base };
+}
+
+/** Base du jour : état d'avant la première évaluation effective d'aujourd'hui. */
+function baseFor(prev: ReviewState | undefined, today: string): DayBase | null {
+  if (!prev) return null;
+  if (prev.lastReviewedDay === today && prev.dayBase !== undefined) return prev.dayBase;
+  return snapshot(prev);
+}
+
+/** Évaluation de révision programmée (règles du lot 2), qui remplace une évaluation de test libre du même jour. */
+export function applyRevision(prev: ReviewState | undefined, cardId: string, rating: Rating, today: string, nowIso: string): ReviewState {
+  const base = baseFor(prev, today);
+  const replacesFree = prev !== undefined && prev.lastReviewedDay === today && prev.lastSource === 'libre' && prev.dayBase !== undefined;
+  const from = replacesFree ? fromBase(base, cardId) : prev;
+  return finish(applyRating(from, cardId, rating, today, nowIso), base, 'revision');
+}
+
+/** Évaluation de test libre ; undefined = sans effet sur la mémorisation. */
+export function applyFreeTest(prev: ReviewState | undefined, cardId: string, signal: FreeSignal, today: string, nowIso: string): ReviewState | undefined {
+  const rating: Rating = signal.kind === 'mcq' ? (signal.correct ? 'good' : 'again') : signal.rating;
+  const success = rating === 'good' || rating === 'easy';
+  const base = baseFor(prev, today);
+  let from = prev;
+  if (prev && prev.lastReviewedDay === today) {
+    // Même jour : seule une évaluation plus défavorable compte, et elle remplace la précédente
+    if (RANK[rating] >= RANK[prev.lastRating]) return undefined;
+    from = prev.dayBase !== undefined ? fromBase(prev.dayBase, cardId) : prev;
+  }
+  if (!success) return finish(applyRating(from, cardId, rating, today, nowIso), base, 'libre');
+  if (!from) {
+    // Carte nouvelle : première réussite prudente (J+3)
+    const first = applyRating(undefined, cardId, 'good', today, nowIso);
+    return finish({ ...first, lastRating: rating }, base, 'libre');
+  }
+  const counts = signal.kind === 'mcq' ? from.dueDay <= today : inDueWindow(from, today);
+  return counts ? finish(applyRating(from, cardId, rating, today, nowIso), base, 'libre') : undefined;
+}
+
 export function isDue(state: ReviewState | undefined, today: string): boolean {
   return state !== undefined && state.dueDay <= today;
 }
@@ -137,6 +234,8 @@ export interface ReviewLogEntry {
   correct?: boolean;
   /** Vrai pour la reprise de fin de séance d'une carte « À revoir » (sans effet sur l'échéance) */
   repeat: boolean;
+  /** Tests libres (v1.2) : 'libre' pour une évaluation de test libre ; absent pour la révision programmée */
+  mode?: 'libre';
   /** Échéance avant / après cette évaluation */
   previousDueDay?: string;
   intervalDays: number;

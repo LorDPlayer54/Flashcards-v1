@@ -3,7 +3,8 @@
 // enregistrées une par une (mêmes garanties que pendant le test : SessionController + écriture conditionnelle).
 import { useEffect, useRef, useState } from 'react';
 import { SELF_EVAL_LABELS, type Card, type SelfEval, type TestSession } from '../../domain/types';
-import { getCards, getSession, saveSessionTransition } from '../../storage/repo';
+import { getCards, getSession, saveEvaluatedTransition } from '../../storage/repo';
+import { localDay } from '../../review/schedule';
 import { SessionController, type ApplyOutcome } from '../../tests/sessionController';
 import { evaluateDeferred, finishCorrection, summarize } from '../../tests/session';
 import { currentScopeLabel } from '../../taxonomy/labelMerge';
@@ -35,7 +36,7 @@ export function TestCorrection({ sessionId }: { sessionId: string }) {
         if (!alive) return;
         if (s && s.status === 'finished') return navigate(`test/summary/${s.sessionId}`, undefined, true);
         if (s && s.status === 'in_progress' && s.phase !== 'correction') return navigate(`test/run/${s.sessionId}`, undefined, true);
-        ctlRef.current = s ? new SessionController(s, (next) => saveSessionTransition(db, next)) : null;
+        ctlRef.current = s ? new SessionController(s, (next) => saveEvaluatedTransition(db, next, localDay())) : null;
         setSession(s ?? null);
       })
       .catch((e: unknown) => alive && setLoadError(errorMessage(e)));

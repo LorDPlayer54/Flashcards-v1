@@ -15,9 +15,10 @@ import { isDue, type ReviewLogEntry, type ReviewState } from './schedule';
  * déjà étudiée aujourd'hui ne libère donc aucune place. Une même carte ne compte qu'une fois par jour.
  * Les reprises de fin de séance et les révisions de cartes déjà connues ne comptent pas.
  */
-export function introducedFromLog(entries: Iterable<Pick<ReviewLogEntry, 'cardId' | 'day' | 'repeat' | 'previousDueDay'>>, today: string): number {
+export function introducedFromLog(entries: Iterable<Pick<ReviewLogEntry, 'cardId' | 'day' | 'repeat' | 'previousDueDay' | 'mode'>>, today: string): number {
   const ids = new Set<string>();
-  for (const e of entries) if (e.day === today && !e.repeat && e.previousDueDay === undefined) ids.add(e.cardId);
+  // v1.2 : une carte introduite par un test libre ne consomme pas le quota de la révision programmée
+  for (const e of entries) if (e.day === today && !e.repeat && e.previousDueDay === undefined && e.mode !== 'libre') ids.add(e.cardId);
   return ids.size;
 }
 
@@ -87,4 +88,17 @@ export function planReview(
 /** Deux files identiques (mêmes cartes, même ordre) ? Sert à revalider une séance au moment du lancement. */
 export function sameQueue(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((id, i) => id === b[i]);
+}
+
+/**
+ * v1.1.0 : aperçu d'une séance. Répartit les cartes dues entre « en retard » (échéance antérieure à aujourd'hui)
+ * et « à revoir aujourd'hui » (échéance aujourd'hui). Ne change ni la file ni son ordre.
+ */
+export function splitDue(due: readonly string[], states: ReadonlyMap<string, Pick<ReviewState, 'dueDay'>>, today: string): { overdue: number; today: number } {
+  let overdue = 0;
+  for (const id of due) {
+    const s = states.get(id);
+    if (s && s.dueDay < today) overdue++;
+  }
+  return { overdue, today: due.length - overdue };
 }

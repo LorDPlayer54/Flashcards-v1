@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { SELF_EVAL_LABELS, type Card, type SelfEval, type TestSession } from '../../domain/types';
 import { localDay } from '../../review/schedule';
-import { getCard, getSession, saveRevisionTransition, saveSessionTransition } from '../../storage/repo';
+import { getCard, getReviewState, getSession, saveEvaluatedTransition } from '../../storage/repo';
 import { SessionController, type ApplyOutcome } from '../../tests/sessionController';
 import {
   applyUserTransition,
@@ -36,6 +36,8 @@ import {
   withDeadline,
 } from '../../tests/session';
 import { useApp } from '../AppContext';
+import { cardVisual } from '../cardVisual';
+import { monogramOf } from '../monogram';
 import { ErrorNotice, errorMessage, formatClock } from '../components/common';
 import { RichText } from '../components/RichText';
 import { navigate } from '../router';
@@ -45,13 +47,12 @@ const EVALS: SelfEval[] = ['again', 'hard', 'good', 'easy'];
 const MCQ_RATINGS: Exclude<SelfEval, 'again'>[] = ['hard', 'good', 'easy'];
 
 /**
- * Enregistrement selon le mode : un test libre n'écrit que la session ; une révision programmée met aussi à jour,
- * dans la même transaction, l'état de mémorisation et l'historique (lot 2).
+ * Enregistrement : la session, et dans la même transaction l'état de mémorisation et l'historique (révision
+ * programmée depuis le lot 2, test libre depuis la v1.2).
  */
-function saverFor(db: Parameters<typeof saveSessionTransition>[0], s: TestSession) {
-  return s.mode === 'revision'
-    ? (next: TestSession) => saveRevisionTransition(db, next, localDay())
-    : (next: TestSession) => saveSessionTransition(db, next);
+function saverFor(db: Parameters<typeof saveEvaluatedTransition>[0], _s: TestSession) {
+  // v1.2 : révisions et tests libres alimentent le même état de mémorisation (règles dans review/schedule.ts)
+  return (next: TestSession) => saveEvaluatedTransition(db, next, localDay());
 }
 
 export function TestRun({ sessionId }: { sessionId: string }) {
@@ -63,6 +64,8 @@ export function TestRun({ sessionId }: { sessionId: string }) {
   const [card, setCard] = useState<Card | null | undefined>(undefined);
   const [cardError, setCardError] = useState<string | null>(null);
   const [cardAttempt, setCardAttempt] = useState(0);
+  /** Refonte (états des cartes V1) : dernière catégorie de révision enregistrée pour la carte affichée, relue en base */
+  const [latestRating, setLatestRating] = useState<SelfEval | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -158,6 +161,19 @@ export function TestRun({ sessionId }: { sessionId: string }) {
     // position : une reprise de fin de séance peut suivre immédiatement la même carte
   }, [db, cardId, position, cardAttempt]);
 
+  // Refonte : catégorie de révision enregistrée pour la carte affichée, relue après chaque écriture confirmée
+  // (v1.2 : une évaluation effective, en révision comme en test libre, est donc reflétée aussitôt)
+  useEffect(() => {
+    let alive = true;
+    if (!cardId) return;
+    getReviewState(db, cardId)
+      .then((st) => alive && setLatestRating(st?.lastRating ?? null))
+      .catch(() => alive && setLatestRating(null));
+    return () => {
+      alive = false;
+    };
+  }, [db, cardId, session]);
+
   // Après validation d'un QCM ou affichage de la réponse, rendre la correction visible sur petit écran
   useEffect(() => {
     if (answeredCurrent || revealed) correctionRef.current?.scrollIntoView({
@@ -165,6 +181,30 @@ export function TestRun({ sessionId }: { sessionId: string }) {
         block: 'nearest',
       });
   }, [answeredCurrent, revealed]);
+
+  // v1.2, révision chronométrée : le temps écoulé est enregistré régulièrement (toutes les 15 s et quand l'application
+  // passe en arrière-plan), pour qu'un rechargement ou une reprise ne remette pas le compteur à zéro.
+  const hasBudget = Boolean(session && session.config.timer?.mode === 'elapsed' && session.config.timer.budgetSec);
+  useEffect(() => {
+    if (!hasBudget || !clockActive || session?.pausedAt) return;
+    const checkpoint = () => {
+      const ctl = ctlRef.current;
+      if (!ctl || ctl.busy || ctl.pending) return;
+      void applyUserTransition(ctl, src, (s) => ({ ...s, updatedAt: new Date().toISOString() }))
+        .then((res) => {
+          if (res.status === 'saved') setSession(res.session);
+          else if (res.status === 'failed' && res.stale) setStaleError(res.error);
+        })
+        .catch(() => undefined); // simple point de sauvegarde : la prochaine transition enregistrera le temps
+    };
+    const id = window.setInterval(checkpoint, 15_000);
+    const onHide = () => document.visibilityState === 'hidden' && checkpoint();
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onHide);
+    };
+  }, [hasBudget, clockActive, session?.pausedAt, session?.sessionId]);
 
   if (loadError) {
     return (
@@ -290,6 +330,8 @@ export function TestRun({ sessionId }: { sessionId: string }) {
   const isLast = index >= total - 1;
 
   const goNext = () => void run((s) => advance(s));
+  const budgetSec = session.config.timer?.mode === 'elapsed' ? session.config.timer.budgetSec : undefined;
+  const budgetLeft = budgetSec ? budgetSec * 1000 - elapsedNow() : null;
 
   const validateMcq = () => {
     if (!card || !selected || answer) return;
@@ -304,7 +346,8 @@ export function TestRun({ sessionId }: { sessionId: string }) {
   const evaluate = (e: SelfEval) => {
     if (!card || answer) return;
     const t = cardTime();
-    void run((s) => advance(recordAnswer(s, card.cardId, { ...selfEvaluate(e, new Date().toISOString()), ...t })));
+    // v1.2 : l'évaluation est enregistrée, la carte reste affichée ; « Suivant » fait avancer
+    void run((s) => recordAnswer(s, card.cardId, { ...selfEvaluate(e, new Date().toISOString()), ...t }));
   };
 
   /** Correction en fin de test : question ouverte traitée, autoévaluation reportée à la correction */
@@ -315,11 +358,11 @@ export function TestRun({ sessionId }: { sessionId: string }) {
     void run((s) => advance(recordAnswer(s, card.cardId, deferAnswer(now, t.timeMs)), now));
   };
 
-  /** Révision : QCM juste → note de maîtrise puis carte suivante, en une seule transition */
+  /** Révision : QCM juste → note de maîtrise ; v1.2 : la carte reste affichée, « Suivant » fait avancer */
   const rate = (r: Exclude<SelfEval, 'again'>) => {
     if (!card) return;
     const now = new Date().toISOString();
-    void run((s) => advance(rateMcq(s, card.cardId, r, now), now));
+    void run((s) => rateMcq(s, card.cardId, r, now));
   };
   const mcqNeedsRating = isRevision && answer?.kind === 'mcq' && answer.correct && !answer.rating;
 
@@ -405,14 +448,20 @@ export function TestRun({ sessionId }: { sessionId: string }) {
         <div className="progress">
           <div className="progress-fill" style={{ width: `${((index + (answer ? 1 : 0)) / total) * 100}%` }} />
         </div>
-        {timerMode !== 'off' && (
-          <span
-            className={`timer small${limitLeft !== null && limitLeft < 60_000 ? ' low' : ''}`}
-            aria-label={limitLeft !== null ? 'Temps restant' : 'Temps écoulé'}
-          >
-            {limitLeft !== null ? `reste ${formatClock(limitLeft)}` : formatClock(elapsedNow())}
-          </span>
-        )}
+        {timerMode !== 'off' &&
+          (budgetLeft !== null ? (
+            // v1.2, révision : temps alloué indicatif ; au-delà, dépassement signalé sans interrompre la séance
+            <span className={`timer small${budgetLeft < 0 ? ' over' : ''}`} aria-label={budgetLeft < 0 ? 'Temps alloué dépassé de' : 'Temps restant'}>
+              {budgetLeft < 0 ? `+${formatClock(-budgetLeft)}` : `reste ${formatClock(budgetLeft)}`}
+            </span>
+          ) : (
+            <span
+              className={`timer small${limitLeft !== null && limitLeft < 60_000 ? ' low' : ''}`}
+              aria-label={limitLeft !== null ? 'Temps restant' : 'Temps écoulé'}
+            >
+              {limitLeft !== null ? `reste ${formatClock(limitLeft)}` : formatClock(elapsedNow())}
+            </span>
+          ))}
       </div>
       {paused ? (
         <span className="icon-spacer" />
@@ -527,6 +576,8 @@ export function TestRun({ sessionId }: { sessionId: string }) {
   const isMcq = card.formatQuestion === 'mcq' && card.options && card.correctOptionId;
   // Correction en fin de test : aucune correction pendant les questions
   const showCorrection = !endMode && (Boolean(answer) || (!isMcq && revealed));
+  // États des cartes V1 : retour QCM transitoire (tant que la correction est affichée), sinon dernière catégorie enregistrée
+  const visual = cardVisual(latestRating, answer?.kind === 'mcq' && !endMode ? (answer.correct ? 'correct' : 'incorrect') : null);
 
   return (
     <div className="page run with-action-bar">
@@ -539,8 +590,22 @@ export function TestRun({ sessionId }: { sessionId: string }) {
           {repeat && <span className="chip warn">Reprise : carte « À revoir »</span>}
         </div>
       )}
-      <p className="crumbs small">{path}</p>
-      <article className="card-block question-card">
+      <div className="card-origin">
+        <span className="monogram sm" aria-hidden="true">
+          {monogramOf(card.matiere)}
+        </span>
+        <span className="row-main">
+          <span className="origin-subject">{card.matiere}</span>
+          <span className="crumbs small">{[card.theme, card.lecon, card.notion].filter(Boolean).join(' › ') || path}</span>
+        </span>
+      </div>
+      <article className={`question-card cat-${visual.surface}`}>
+        <div className="card-badges">
+          <span className="cat-badge">
+            <span className="cat-dot" aria-hidden="true" />
+            {visual.badge}
+          </span>
+        </div>
         <RichText text={card.question} className="question" />
       </article>
 
@@ -593,11 +658,6 @@ export function TestRun({ sessionId }: { sessionId: string }) {
             </>
           )}
           {answer?.kind === 'open' && <p className="muted">Votre autoévaluation : {SELF_EVAL_LABELS[answer.selfEval]}</p>}
-          {isRevision && answer?.kind === 'mcq' && !answer.correct && (
-            <p className="muted small">
-              {repeat ? 'La carte sera revue demain.' : 'Noté « À revoir » : la carte sera reproposée en fin de séance, puis revue demain.'}
-            </p>
-          )}
         </section>
       )}
 

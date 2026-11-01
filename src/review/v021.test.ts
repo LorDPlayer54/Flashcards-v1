@@ -13,6 +13,7 @@ import { SessionController } from '../tests/sessionController';
 import { msUntilNextDay, watchLocalDay } from './dayWatch';
 import { newRemainingToday, planReview } from './queue';
 import { addDays } from './schedule';
+import { startReviewAllStudied } from '../tests/studyAll';
 
 const D = '2026-10-30';
 const NOW = '2026-10-30T09:00:00.000Z';
@@ -58,7 +59,7 @@ describe('Important 1 — lancement d’une révision revalidé dans la transact
   it('cas nominal : la séance créée correspond exactement à l’aperçu', async () => {
     const { db, metas } = await setup();
     const plan = await preview(db, metas);
-    const res = await repo.startReviewSession(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: plan.queue, confirmedReplace: [], today: D, now: NOW });
+    const res = await startReviewAllStudied(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: plan.queue, confirmedReplace: [], today: D, now: NOW });
     expect(res.status).toBe('started');
     if (res.status !== 'started') return;
     expect(res.session.cardIds).toEqual(plan.queue);
@@ -72,7 +73,7 @@ describe('Important 1 — lancement d’une révision revalidé dans la transact
     const stale = await preview(db, calcul); // aperçu affiché : 4 nouvelles cartes
     await review(db, stale.queue.slice(0, 2)); // ailleurs, 2 d'entre elles sont notées (non dues avant J+3)
     const before = await db.getAll('sessions');
-    const res = await repo.startReviewSession(db, { nodeId: mat('Calcul'), scopeLabel: 'Calcul', expectedQueue: stale.queue, confirmedReplace: [], today: D });
+    const res = await startReviewAllStudied(db, { nodeId: mat('Calcul'), scopeLabel: 'Calcul', expectedQueue: stale.queue, confirmedReplace: [], today: D });
     expect(res.status).toBe('changed');
     if (res.status !== 'changed') return;
     expect(res.plan.queue).toEqual(stale.queue.slice(2));
@@ -86,12 +87,12 @@ describe('Important 1 — lancement d’une révision revalidé dans la transact
     const staleEco = await preview(db, eco);
     expect(staleEco.fresh).toHaveLength(3);
     await review(db, (await preview(db, scopeOf(metas, 'Calcul'))).queue); // 3 cartes Calcul introduites
-    const res = await repo.startReviewSession(db, { nodeId: mat('Économie'), scopeLabel: 'Économie', expectedQueue: staleEco.queue, confirmedReplace: [], today: D });
+    const res = await startReviewAllStudied(db, { nodeId: mat('Économie'), scopeLabel: 'Économie', expectedQueue: staleEco.queue, confirmedReplace: [], today: D });
     expect(res.status).toBe('changed');
     if (res.status === 'changed') expect(res.plan.fresh).toEqual([]);
     expect(await repo.countIntroducedOn(db, D)).toBe(3);
     // Nouvel essai avec l'aperçu actualisé : rien à réviser, aucune séance créée
-    const again = await repo.startReviewSession(db, { nodeId: mat('Économie'), scopeLabel: 'Économie', expectedQueue: [], confirmedReplace: [], today: D });
+    const again = await startReviewAllStudied(db, { nodeId: mat('Économie'), scopeLabel: 'Économie', expectedQueue: [], confirmedReplace: [], today: D });
     expect(again.status).toBe('empty');
   });
 
@@ -99,11 +100,11 @@ describe('Important 1 — lancement d’une révision revalidé dans la transact
     const { db, metas } = await setup();
     const stale = await preview(db, metas); // 8 nouvelles (quota 20)
     await repo.setNewPerDay(db, 2);
-    const res = await repo.startReviewSession(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: stale.queue, confirmedReplace: [], today: D });
+    const res = await startReviewAllStudied(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: stale.queue, confirmedReplace: [], today: D });
     expect(res.status).toBe('changed');
     if (res.status !== 'changed') return;
     expect(res.plan.queue).toHaveLength(2);
-    const ok = await repo.startReviewSession(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: res.plan.queue, confirmedReplace: [], today: D });
+    const ok = await startReviewAllStudied(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: res.plan.queue, confirmedReplace: [], today: D });
     expect(ok.status).toBe('started');
   });
 
@@ -116,7 +117,7 @@ describe('Important 1 — lancement d’une révision revalidé dans la transact
     await new SessionController(s0, (x) => repo.saveRevisionTransition(db, x, addDays(D, -1))).apply(recordAnswer(s0, metas[0]!.cardId, selfEvaluate('again', NOW)));
     const staleYesterday = await preview(db, metas, addDays(D, -1)); // aperçu calculé la veille : vide
     expect(staleYesterday.queue).toEqual([]);
-    const res = await repo.startReviewSession(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: staleYesterday.queue, confirmedReplace: [s0.sessionId], today: D });
+    const res = await startReviewAllStudied(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: staleYesterday.queue, confirmedReplace: [s0.sessionId], today: D });
     expect(res.status).toBe('changed');
     if (res.status === 'changed') expect(res.plan.due).toEqual([metas[0]!.cardId]);
   });
@@ -127,7 +128,7 @@ describe('Important 1 — lancement d’une révision revalidé dans la transact
     const plan = await preview(db, metas);
     // v0.2.2 (I2) : aucun des deux onglets n'a vu de séance en cours → aucun remplacement silencieux
     const req = { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: plan.queue, confirmedReplace: [], today: D };
-    const [a, b] = await Promise.all([repo.startReviewSession(db, req), repo.startReviewSession(tabB, req)]);
+    const [a, b] = await Promise.all([startReviewAllStudied(db, req), startReviewAllStudied(tabB, req)]);
     expect([a.status, b.status].sort()).toEqual(['conflict', 'started']);
     const active = await repo.getInProgressSessions(db);
     expect(active).toHaveLength(1);
@@ -145,7 +146,7 @@ describe('Important 1 — lancement d’une révision revalidé dans la transact
     const plan = await preview(db, metas);
     // Échec provoqué : l'identifiant de la nouvelle séance entre en collision avec la séance existante
     globalThis.crypto.randomUUID = (() => previous.sessionId) as typeof globalThis.crypto.randomUUID;
-    await expect(repo.startReviewSession(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: plan.queue, confirmedReplace: [previous.sessionId], today: D })).rejects.toBeTruthy();
+    await expect(startReviewAllStudied(db, { nodeId: ROOT_ID, scopeLabel: 'Tout', expectedQueue: plan.queue, confirmedReplace: [previous.sessionId], today: D })).rejects.toBeTruthy();
     globalThis.crypto.randomUUID = realUuid;
     const all = await db.getAll('sessions');
     expect(all).toHaveLength(1);
@@ -343,5 +344,5 @@ it('le périmètre résolu par l’arbre est accepté tel quel par startReviewSe
   const { db, metas, tax } = await setup();
   const scoped = resolveScope({ kind: 'node', nodeId: ROOT_ID }, tax, metas);
   const plan = await preview(db, scoped);
-  expect((await repo.startReviewSession(db, { nodeId: ROOT_ID, scopeLabel: 'x', expectedQueue: plan.queue, confirmedReplace: [], today: D })).status).toBe('started');
+  expect((await startReviewAllStudied(db, { nodeId: ROOT_ID, scopeLabel: 'x', expectedQueue: plan.queue, confirmedReplace: [], today: D })).status).toBe('started');
 });

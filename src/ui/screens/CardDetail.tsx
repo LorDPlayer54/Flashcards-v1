@@ -3,11 +3,12 @@ import { useEffect, useState } from 'react';
 import { SELF_EVAL_LABELS, type Card } from '../../domain/types';
 import { isMastered, STATUS_LABELS, statusOf, type ReviewLogEntry, type ReviewState } from '../../review/schedule';
 import { deleteCard, getCard, getReviewLogForCard, getReviewState, MANUAL_SOURCE } from '../../storage/repo';
-import { pathKeyOf } from '../../taxonomy/tree';
+import { childNodeId, pathKeyOf, ROOT_ID } from '../../taxonomy/tree';
 import { useApp } from '../AppContext';
-import { ErrorNotice, errorMessage, formatLabel, plural, TopBar } from '../components/common';
+import { ErrorNotice, errorMessage, formatLabel, Icon, plural, TopBar } from '../components/common';
+import { cardVisual } from '../cardVisual';
 import { RichText } from '../components/RichText';
-import { href, libraryHref } from '../router';
+import { goBackTo, href, libraryHref } from '../router';
 import { formatDay } from '../useReview';
 
 export function CardDetail({ cardId }: { cardId: string }) {
@@ -17,6 +18,8 @@ export function CardDetail({ cardId }: { cardId: string }) {
   const [attempt, setAttempt] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showSource, setShowSource] = useState(false);
   const [memo, setMemo] = useState<{ state?: ReviewState; log: ReviewLogEntry[] } | null>(null);
 
   useEffect(() => {
@@ -34,9 +37,19 @@ export function CardDetail({ cardId }: { cardId: string }) {
     };
   }, [db, cardId, attempt]);
 
+  // Retour stable : vers l'écran d'origine (Bibliothèque, Recherche, bilan) s'il précède la fiche, jamais vers un
+  // formulaire d'édition ; sinon vers le niveau de la carte dans la Bibliothèque (ouverture directe, rechargement).
   const goBack = () => {
-    if (window.history.length > 1) window.history.back();
-    else window.location.hash = libraryHref('root').slice(1);
+    let fallback = libraryHref(ROOT_ID);
+    if (card) {
+      let id = ROOT_ID;
+      for (const [kind, label] of [['matiere', card.matiere], ['theme', card.theme], ['lecon', card.lecon], ['notion', card.notion]] as const) {
+        if (!label) break;
+        id = childNodeId(id, kind, label);
+      }
+      fallback = libraryHref(id);
+    }
+    goBackTo(fallback, (prev) => !prev.startsWith('#/card/'));
   };
 
   if (loadError)
@@ -67,7 +80,7 @@ export function CardDetail({ cardId }: { cardId: string }) {
       await deleteCard(db, card.cardId);
     } catch (e) {
       setDeleting(false);
-      setActionError(`La carte n'a pas été supprimée : ${errorMessage(e)}`);
+      setActionError(`Suppression impossible. La carte n'a pas été supprimée (${errorMessage(e)}). Réessayez.`);
       return;
     }
     try {
@@ -88,8 +101,15 @@ export function CardDetail({ cardId }: { cardId: string }) {
         {card.typePedagogique && <span className="chip">{card.typePedagogique}</span>}
       </div>
 
-      <section className="card-block">
-        <h3 className="label">Question</h3>
+      {/* États des cartes V1 : surface selon la dernière catégorie de révision enregistrée */}
+      <section className={`question-card cat-${cardVisual(memo?.state?.lastRating, null).surface}`}>
+        <div className="card-badges">
+          <span className="cat-badge">
+            <span className="cat-dot" aria-hidden="true" />
+            {cardVisual(memo?.state?.lastRating, null).badge}
+          </span>
+          <span className="format-tag">Question</span>
+        </div>
         <RichText text={card.question} className="question" />
         {card.options && (
           <ol className="options readonly">
@@ -103,95 +123,138 @@ export function CardDetail({ cardId }: { cardId: string }) {
         )}
       </section>
 
-      <section className="card-block">
-        <h3 className="label">Réponse</h3>
-        <RichText text={card.reponse} />
+      {/* Fiche V3 : réponse et explications en sections séparées */}
+      <section className="answerbox" aria-label="Réponse et explications">
+        <div className="answer-section answer-main">
+          <h3 className="answer-label">Réponse</h3>
+          <RichText text={card.reponse} className="answertext" />
+        </div>
         {card.explication && (
-          <>
-            <h3 className="label">Explication</h3>
-            <RichText text={card.explication} />
-          </>
+          <div className="answer-section">
+            <h3 className="answer-label">Explication</h3>
+            <RichText text={card.explication} className="answer-copy" />
+          </div>
         )}
         {card.astucePiege && (
-          <>
-            <h3 className="label">Astuce / Piège</h3>
-            <RichText text={card.astucePiege} />
-          </>
+          <div className="answer-section">
+            <h3 className="answer-label">Astuce / Piège</h3>
+            <RichText text={card.astucePiege} className="answer-copy" />
+          </div>
         )}
       </section>
 
       {memo && (
-        <section className="card-block small">
-          <h3 className="label">Mémorisation</h3>
-          <div className="chips">
+        <section className="card-sheet-section">
+          <div className="sheet-head">
+            <h2>Mémorisation</h2>
             <span className="chip">{STATUS_LABELS[statusOf(memo.state)]}</span>
-            {isMastered(memo.state) && <span className="chip ok">Maîtrisée</span>}
           </div>
-          {memo.state ? (
-            <dl className="meta">
-              <dt>Prochaine révision</dt>
-              <dd>{formatDay(memo.state.dueDay)}</dd>
-              <dt>Intervalle</dt>
-              <dd>{plural(memo.state.intervalDays, 'jour', 'jours')}</dd>
-              <dt>Dernière évaluation</dt>
-              <dd>{SELF_EVAL_LABELS[memo.state.lastRating]}</dd>
-              <dt>Révisions</dt>
-              <dd>
-                {memo.state.reviewCount} (dont {memo.state.lapses} « À revoir »)
-              </dd>
-            </dl>
-          ) : (
-            <p className="muted">Jamais révisée en révision programmée.</p>
-          )}
-          {memo.log.length > 0 && (
-            <>
-              <h3 className="label">Historique des révisions</h3>
-              <ul className="history">
-                {memo.log
-                  .slice(-10)
-                  .reverse()
-                  .map((l) => (
-                    <li key={l.logId}>
-                      <span>{new Date(l.at).toLocaleDateString('fr-FR')}</span>
-                      <span>
-                        {SELF_EVAL_LABELS[l.rating]}
-                        {l.correct !== undefined && (l.correct ? ' · QCM juste' : ' · QCM faux')}
-                        {l.repeat && ' · reprise'}
-                      </span>
-                    </li>
-                  ))}
-              </ul>
-            </>
-          )}
+          <div className="memo-panel">
+            {memo.state ? (
+              <>
+                <dl className="memo-rows">
+                  <div>
+                    <dt>Prochaine révision</dt>
+                    <dd>{formatDay(memo.state.dueDay)}</dd>
+                  </div>
+                  <div>
+                    <dt>Intervalle</dt>
+                    <dd>{plural(memo.state.intervalDays, 'jour', 'jours')}</dd>
+                  </div>
+                  <div>
+                    <dt>Révisions</dt>
+                    <dd>{memo.state.reviewCount}</dd>
+                  </div>
+                  <div>
+                    <dt>« À revoir »</dt>
+                    <dd>{memo.state.lapses}</dd>
+                  </div>
+                </dl>
+                <div className="chips">
+                  <span className="chip">Dernière évaluation : {SELF_EVAL_LABELS[memo.state.lastRating]}</span>
+                  {isMastered(memo.state) && <span className="chip ok">Maîtrisée</span>}
+                </div>
+              </>
+            ) : (
+              <p className="muted">Aucun état de mémorisation : la carte sera proposée comme nouvelle.</p>
+            )}
+            {memo.log.length > 0 && (
+              <>
+                <button type="button" className="section-toggle" aria-expanded={showHistory} aria-controls="card-history" onClick={() => setShowHistory((v) => !v)}>
+                  <span>
+                    <strong>Historique des évaluations</strong>
+                  </span>
+                  <Icon name="chevron" />
+                </button>
+                {showHistory && (
+                  <ul id="card-history" className="history">
+                    {memo.log
+                      .slice(-10)
+                      .reverse()
+                      .map((l) => (
+                        <li key={l.logId}>
+                          <span>{new Date(l.at).toLocaleDateString('fr-FR')}</span>
+                          <span>
+                            {SELF_EVAL_LABELS[l.rating]}
+                            {l.correct !== undefined && (l.correct ? ' · QCM juste' : ' · QCM faux')}
+                            {l.repeat && ' · reprise'}
+                            {l.mode === 'libre' && ' · test libre'}
+                          </span>
+                        </li>
+                      ))}
+                  </ul>
+                )}
+              </>
+            )}
+          </div>
         </section>
       )}
 
-      <section className="card-block small">
-        <h3 className="label">Provenance</h3>
-        <dl className="meta">
-          <dt>Collection</dt>
-          <dd>{collection?.name ?? 'inconnue'}</dd>
-          <dt>{manual ? 'Origine' : 'Fichier'}</dt>
-          <dd>{card.sourceFile}</dd>
-          {!manual && (
-            <>
-              <dt>Rang dans le fichier</dt>
-              <dd>{card.sourceRow}</dd>
-            </>
-          )}
-          <dt>Identifiant source</dt>
-          <dd>{card.externalId ?? (card.duplicateExternalId ? `${card.duplicateExternalId} (doublon, retiré à la migration)` : '—')}</dd>
-          <dt>{manual ? 'Créée le' : 'Importée le'}</dt>
-          <dd>{new Date(card.createdAt).toLocaleString('fr-FR')}</dd>
-          <dt>Mise à jour le</dt>
-          <dd>{new Date(card.updatedAt).toLocaleString('fr-FR')}</dd>
-          {card.editedAt && (
-            <>
-              <dt>Modifiée dans l'application le</dt>
-              <dd>{new Date(card.editedAt).toLocaleString('fr-FR')}</dd>
-            </>
-          )}
-        </dl>
+      <section className="card-sheet-section">
+        <button type="button" className="section-toggle" aria-expanded={showSource} aria-controls="card-source" onClick={() => setShowSource((v) => !v)}>
+          <span>
+            <strong>Provenance et informations de la carte</strong>
+          </span>
+          <Icon name="chevron" />
+        </button>
+        {showSource && (
+          <div id="card-source" className="memo-panel">
+            <dl className="memo-rows">
+              <div>
+                <dt>Collection</dt>
+                <dd>{collection?.name ?? 'inconnue'}</dd>
+              </div>
+              <div>
+                <dt>{manual ? 'Origine' : 'Fichier source'}</dt>
+                <dd>{card.sourceFile}</dd>
+              </div>
+              {!manual && (
+                <div>
+                  <dt>Rang</dt>
+                  <dd>{card.sourceRow}</dd>
+                </div>
+              )}
+              <div>
+                <dt>ID source</dt>
+                <dd>{card.externalId ?? (card.duplicateExternalId ? `${card.duplicateExternalId} (doublon, retiré à la migration)` : '—')}</dd>
+              </div>
+              <div>
+                <dt>{manual ? 'Créée le' : 'Importée le'}</dt>
+                <dd>{new Date(card.createdAt).toLocaleString('fr-FR')}</dd>
+              </div>
+              <div>
+                <dt>Mise à jour le</dt>
+                <dd>{new Date(card.updatedAt).toLocaleString('fr-FR')}</dd>
+              </div>
+              {card.editedAt && (
+                <div>
+                  <dt>Modifiée dans l'application le</dt>
+                  <dd>{new Date(card.editedAt).toLocaleString('fr-FR')}</dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        )}
       </section>
 
       <a className="btn secondary block" href={href(`card/${encodeURIComponent(card.cardId)}/edit`)}>

@@ -39,9 +39,36 @@ export async function buildBackup(db: DB, now: string = new Date().toISOString()
   };
 }
 
-export function backupFileName(now: Date = new Date()): string {
+export const DEFAULT_BACKUP_BASE = 'flashcards-sauvegarde';
+
+/**
+ * Refonte (Plus V2) : nom du fichier de sauvegarde, personnalisable. Seul le nom change : ni le format ni le contenu.
+ * Accents retirés (certains navigateurs ignorent un nom de téléchargement non ASCII et le remplacent par
+ * « download »), caractères interdits dans un nom de fichier remplacés, extension « .json » toujours présente (une seule fois),
+ * date et heure locales ajoutées si demandé ; nom vide → nom par défaut.
+ */
+export function customBackupName(base: string, withDate: boolean, now: Date = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0');
-  return `flashcards-sauvegarde-${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}.json`;
+  let name = base
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/œ/g, 'oe')
+    .replace(/Œ/g, 'OE')
+    .replace(/æ/g, 'ae')
+    .replace(/Æ/g, 'AE')
+    .replace(/[^\x20-\x7e]+/g, '-')
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .trim()
+    .replace(/(\.json)+$/i, '')
+    .replace(/^[.\s-]+|[.\s-]+$/g, '')
+    .slice(0, 80);
+  if (!name) name = DEFAULT_BACKUP_BASE;
+  const date = withDate ? `-${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}` : '';
+  return `${name}${date}.json`;
+}
+
+export function backupFileName(now: Date = new Date()): string {
+  return customBackupName(DEFAULT_BACKUP_BASE, true, now);
 }
 
 /** Fichier de sauvegarde prêt à être téléchargé ou partagé. */

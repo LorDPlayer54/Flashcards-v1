@@ -36,7 +36,7 @@ export function cacheName(appVersion: string, precache: readonly string[], conte
 
 export function serviceWorkerSource(appVersion: string, precache: readonly string[], contents: readonly string[] = []): string {
   const cache = cacheName(appVersion, precache, contents);
-  return `// Service worker Flashcards ENA ${appVersion} — généré au build (src/pwa/serviceWorker.ts). Ne pas modifier.
+  return `// Service worker Flashcard ${appVersion} — généré au build (src/pwa/serviceWorker.ts). Ne pas modifier.
 const CACHE = ${JSON.stringify(cache)};
 const PREFIX = ${JSON.stringify(CACHE_PREFIX)};
 const PRECACHE = ${JSON.stringify(precache)};

@@ -114,6 +114,11 @@ export interface TimerConfig {
   /** Durée maximale en secondes (mode 'limit') */
   limitSec?: number;
   /**
+   * v1.2, révision programmée : temps alloué en secondes (1 minute par carte prévue), indicatif. Le chronomètre
+   * reste en mode « temps écoulé » : la séance n'est jamais interrompue, le dépassement est seulement signalé.
+   */
+  budgetSec?: number;
+  /**
    * Lot 3B, temps limité : true = entraînement chronométré (pause possible) ; absent ou false = simulation d'examen
    * (compte à rebours continu, sans pause). Le chronomètre « temps écoulé » peut toujours être mis en pause.
    */

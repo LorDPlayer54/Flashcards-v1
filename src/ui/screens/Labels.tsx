@@ -1,4 +1,4 @@
-// Lot 3B : fusion explicite des libellés (matière, thème, leçon, notion).
+// Libellés V1 (figée) ; lot 3B : fusion explicite des libellés (matière, thème, leçon, notion).
 // Sans niveau choisi : libellés semblables détectés (suggestions) et fusions mémorisées.
 // Avec un niveau parent : choix des libellés frères à fusionner, du libellé cible, aperçu (libellés et nombre de
 // cartes), puis confirmation explicite. Jamais de fusion automatique.
@@ -7,13 +7,16 @@ import { forgetLabelRule, getLabelRules, mergeLabels } from '../../storage/repo'
 import { similarLabelGroups, similarLabels, type LabelLevel, type LabelRule } from '../../taxonomy/labelMerge';
 import { childNodeId, LEVEL_LABELS, nodePathLabel, ROOT_ID, type TaxNode } from '../../taxonomy/tree';
 import { useApp } from '../AppContext';
-import { ErrorNotice, errorMessage, plural, Segmented, TopBar } from '../components/common';
+import { searchable } from '../../domain/text';
+import { ConfirmDialog, ErrorNotice, errorMessage, Icon, num, plural, SavedNotice, Segmented, TopBar } from '../components/common';
 import { href, libraryHref, navigate, type Route } from '../router';
 
 const LEVEL_PLURAL: Record<LabelLevel, string> = { matiere: 'Matières', theme: 'Thèmes', lecon: 'Leçons', notion: 'Notions' };
 
-export function labelsHref(parentId: string, level?: LabelLevel, selected?: string[]): string {
-  return href('labels', { n: parentId, k: level, s: selected && selected.length ? JSON.stringify(selected) : undefined });
+const LEVEL_LETTER: Record<LabelLevel, string> = { matiere: 'M', theme: 'T', lecon: 'L', notion: 'N' };
+
+export function labelsHref(parentId: string, level?: LabelLevel, selected?: string[], fromLabels?: boolean): string {
+  return href('labels', { n: parentId, k: level, s: selected && selected.length ? JSON.stringify(selected) : undefined, o: fromLabels ? '1' : undefined });
 }
 
 function parseSelected(raw: string | null): string[] {
@@ -36,6 +39,10 @@ function Overview() {
   const [rules, setRules] = useState<LabelRule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [filter, setFilter] = useState('');
+  const [forgetting, setForgetting] = useState<LabelRule | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -48,77 +55,116 @@ function Overview() {
     };
   }, [db, attempt]);
 
-  const forget = async (r: LabelRule) => {
-    if (!window.confirm(`Ne plus appliquer « ${r.from} → ${r.to} » aux prochains imports ? Les cartes déjà fusionnées ne changent pas.`)) return;
+  const forget = async () => {
+    if (!forgetting) return;
+    const r = forgetting;
+    setBusy(true);
+    setNotice(null);
     try {
       await forgetLabelRule(db, r);
-      setAttempt((a) => a + 1);
-      await reload().catch(() => undefined); // règles à jour dans toute l'application (lot 4)
     } catch (e) {
-      setError(errorMessage(e));
+      setBusy(false);
+      setForgetting(null);
+      setNotice({ text: `La règle n'a pas été oubliée : ${errorMessage(e)}. Vous pouvez réessayer.`, error: true });
+      return;
     }
+    setBusy(false);
+    setForgetting(null);
+    setAttempt((a) => a + 1);
+    setNotice({ text: `Règle « ${r.from} → ${r.to} » oubliée. Les cartes déjà fusionnées ne changent pas.`, error: false });
+    await reload().catch(() => undefined); // règles à jour dans toute l'application (lot 4)
   };
 
   const parentLabel = (id: string) => (id === ROOT_ID ? 'Bibliothèque' : nodePathLabel(tax, id));
+  const q = searchable(filter.trim());
+  const shownGroups = q ? groups.filter((g) => searchable(g.labels.map((l) => l.label).join(' ') + ' ' + parentLabel(g.parentId)).includes(q)) : groups;
+  const shownRules = rules && q ? rules.filter((r) => searchable(`${r.from} ${r.to} ${parentLabel(r.parentId)}`).includes(q)) : rules;
 
   return (
-    <div className="page">
-      <TopBar title="Libellés" back={href('more')} />
-      <p className="small">
-        Regroupez des matières, thèmes, leçons ou notions écrits différemment (« Fraction » et « Fractions », par exemple). Rien n'est fusionné sans
-        votre confirmation : choisissez un niveau dans la bibliothèque, puis « Fusionner des libellés ».
-      </p>
+    <div className="page labels-v1">
+      <TopBar title="Libellés" eyebrow="Bibliothèque" back={href('more')} backLabel="Plus" lead="Repérez les écritures semblables et réunissez-les en toute confiance." />
+      <div className="search-field">
+        <Icon name="search" />
+        <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Chercher un libellé" aria-label="Chercher un libellé" autoComplete="off" />
+        {filter && (
+          <button type="button" className="search-clear" onClick={() => setFilter('')} aria-label="Effacer">
+            ×
+          </button>
+        )}
+      </div>
+      {notice && (notice.error ? <ErrorNotice message={notice.text} /> : <p className="notice" role="status">{notice.text}</p>)}
 
       <section>
-        <h3 className="section-title">Libellés semblables détectés</h3>
-        {groups.length === 0 ? (
-          <p className="muted">Aucun libellé semblable détecté.</p>
+        <div className="labels-head">
+          <h2>Libellés semblables</h2>
+          <span className="muted small">{plural(shownGroups.length, 'suggestion', 'suggestions')}</span>
+        </div>
+        <p className="muted small">Sélectionnez une suggestion pour vérifier les cartes concernées avant de fusionner.</p>
+        {shownGroups.length === 0 ? (
+          <p className="muted">{q ? 'Aucune suggestion ne correspond.' : 'Aucun libellé semblable détecté.'}</p>
         ) : (
-          <ul className="list">
-            {groups.map((g) => (
+          <ul className="labels-list">
+            {shownGroups.map((g) => (
               <li key={`${g.parentId}|${g.level}|${g.labels.map((l) => l.label).join('|')}`}>
-                <a className="list-row" href={labelsHref(g.parentId, g.level, g.labels.map((l) => l.label))}>
+                <a className="labels-row" href={labelsHref(g.parentId, g.level, g.labels.map((l) => l.label), true)}>
+                  <span className="level-badge" aria-hidden="true">
+                    {LEVEL_LETTER[g.level]}
+                  </span>
                   <span className="row-main">
-                    {g.labels.map((l) => `« ${l.label} » (${l.total})`).join(', ')}
+                    <strong>{g.labels.map((l) => l.label).join(' · ')}</strong>
                     <span className="row-sub">
-                      {LEVEL_PLURAL[g.level]} de : {parentLabel(g.parentId)}
+                      {LEVEL_PLURAL[g.level]} · {parentLabel(g.parentId)} · {plural(g.labels.reduce((n, l) => n + l.total, 0), 'carte', 'cartes')}
                     </span>
                   </span>
-                  <span className="chev" aria-hidden="true">
-                    ›
-                  </span>
+                  <Icon name="chevron" />
                 </a>
+              </li>
+            ))}
+          </ul>
+        )}
+        <a className="labels-library-link" href={libraryHref(ROOT_ID)}>
+          <Icon name="library" />
+          Fusionner depuis la Bibliothèque
+        </a>
+      </section>
+
+      <section>
+        <div className="labels-head">
+          <h2>Fusions mémorisées</h2>
+          {rules && <span className="muted small">{rules.length}</span>}
+        </div>
+        <p className="muted small">Elles sont appliquées aux prochains imports : un fichier qui contient l'ancien libellé est reclassé automatiquement.</p>
+        {error && <ErrorNotice message={`Lecture impossible : ${error}`} onRetry={() => setAttempt((a) => a + 1)} />}
+        {shownRules && shownRules.length === 0 && <p className="muted">{q ? 'Aucune règle ne correspond.' : "Aucune fusion pour l'instant."}</p>}
+        {shownRules && shownRules.length > 0 && (
+          <ul className="labels-list">
+            {shownRules.map((r) => (
+              <li key={`${r.level}|${r.parentId}|${r.from}`} className="labels-row static">
+                <span className="row-main">
+                  <strong>
+                    {r.from} → {r.to}
+                  </strong>
+                  <span className="row-sub">
+                    {LEVEL_LABELS[r.level]} · {parentLabel(r.parentId)} · {new Date(r.at).toLocaleDateString('fr-FR')}
+                  </span>
+                </span>
+                <button type="button" className="btn secondary small" onClick={() => setForgetting(r)}>
+                  Oublier
+                </button>
               </li>
             ))}
           </ul>
         )}
       </section>
 
-      <section>
-        <h3 className="section-title">Fusions mémorisées</h3>
-        {error && <ErrorNotice message={`Lecture impossible : ${error}`} onRetry={() => setAttempt((a) => a + 1)} />}
-        {rules && rules.length === 0 && <p className="muted">Aucune fusion pour l'instant.</p>}
-        {rules && rules.length > 0 && (
-          <>
-            <p className="muted small">Elles sont appliquées aux prochains imports : un fichier qui contient l'ancien libellé est reclassé automatiquement.</p>
-            <ul className="list">
-              {rules.map((r) => (
-                <li key={`${r.level}|${r.parentId}|${r.from}`} className="list-row static">
-                  <span className="row-main">
-                    « {r.from} » → « {r.to} »
-                    <span className="row-sub">
-                      {LEVEL_LABELS[r.level]} · {parentLabel(r.parentId)} · {new Date(r.at).toLocaleDateString('fr-FR')}
-                    </span>
-                  </span>
-                  <button type="button" className="btn ghost small" onClick={() => void forget(r)}>
-                    Oublier
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </section>
+      {forgetting && (
+        <ConfirmDialog title="Oublier cette fusion ?" confirmLabel="Oublier la règle" busyLabel="Oubli…" busy={busy} onConfirm={() => void forget()} onCancel={() => setForgetting(null)}>
+          <p>
+            « {forgetting.from} » ne sera plus reclassé en « {forgetting.to} » lors des prochains imports.
+          </p>
+          <p className="muted small">Les cartes déjà fusionnées restent sous « {forgetting.to} ». Aucune carte n'est supprimée.</p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
@@ -140,11 +186,16 @@ function MergeForm({ route, parentId }: { route: Route; parentId: string }) {
   const [custom, setCustom] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [doneRefreshFailed, setDoneRefreshFailed] = useState<{ updated: number; target: string; level: LabelLevel } | null>(null);
+  const fromLabels = route.query.get('o') === '1';
+  const backTo = fromLabels ? href('labels') : libraryHref(parentId);
+  const backLabel = fromLabels ? 'Libellés' : 'Bibliothèque';
 
   if (!parent) {
     return (
       <div className="page">
-        <TopBar title="Fusionner des libellés" back={libraryHref(ROOT_ID)} />
+        <TopBar title="Fusionner des libellés" eyebrow="Gestion des libellés" back={backTo} backLabel={backLabel} />
         <p className="notice">Ce niveau n'existe plus (ses cartes ont été déplacées ou supprimées).</p>
         <a className="btn secondary block" href={href('labels')}>
           Libellés semblables
@@ -171,7 +222,7 @@ function MergeForm({ route, parentId }: { route: Route; parentId: string }) {
   const toggle = (label: string) => setSelected((s) => (s.includes(label) ? s.filter((x) => x !== label) : [...s, label]));
 
   const confirm = async () => {
-    if (!valid || !level) return;
+    if (!valid || !level || doneRefreshFailed) return;
     setBusy(true);
     setMessage(null);
     try {
@@ -183,6 +234,7 @@ function MergeForm({ route, parentId }: { route: Route; parentId: string }) {
         expectedCounts: Object.fromEntries(chosen.map((c) => [c.label, c.total])),
       });
       if (res.status === 'changed') {
+        setAsking(false);
         setMessage({ text: "Les cartes de ces libellés ont changé depuis l'affichage (autre onglet ou import). Rien n'a été modifié ; l'aperçu va être actualisé, vérifiez-le puis confirmez de nouveau.", error: true });
         await reload().catch((e: unknown) => setMessage({ text: `Rien n'a été modifié, mais l'aperçu n'a pas pu être actualisé : ${errorMessage(e)}. Rechargez la page.`, error: true }));
         setBusy(false);
@@ -190,22 +242,49 @@ function MergeForm({ route, parentId }: { route: Route; parentId: string }) {
       }
       try {
         await reload();
-      } catch (e) {
+      } catch {
+        // Fusion réalisée : on ne la relance jamais ; seul l'affichage reste à actualiser
         setBusy(false);
-        setMessage({ text: `Fusion effectuée (${plural(res.updated, 'carte reclassée', 'cartes reclassées')}), mais la bibliothèque n'a pas pu être actualisée : ${errorMessage(e)}. Rechargez la page.`, error: true });
+        setAsking(false);
+        setDoneRefreshFailed({ updated: res.updated, target, level });
         return;
       }
       navigate('library', { n: childNodeId(parentId, level, target), merged: String(res.updated) }, true);
     } catch (e) {
       setBusy(false);
+      setAsking(false);
       setMessage({ text: `La fusion n'a pas été effectuée (aucune carte modifiée) : ${errorMessage(e)}. Vous pouvez réessayer.`, error: true });
     }
   };
 
+  const alreadyUnderTarget = targetNode && !chosen.includes(targetNode) ? targetNode.total : chosen.find((c) => c.label === target)?.total ?? 0;
+  const isNew = !targetNode && !chosen.some((c) => c.label === target);
+
+  if (doneRefreshFailed) {
+    return (
+      <div className="page labels-v1">
+        <TopBar title="Fusionner des libellés" eyebrow="Gestion des libellés" back={backTo} backLabel={backLabel} />
+        <SavedNotice
+          title="Fusion effectuée"
+          message={`${plural(doneRefreshFailed.updated, 'carte reclassée', 'cartes reclassées')} sous « ${doneRefreshFailed.target} ». La bibliothèque n'a pas pu être actualisée ; la fusion ne sera pas relancée.`}
+          onRefresh={() =>
+            void reload()
+              .then(() => navigate('library', { n: childNodeId(parentId, doneRefreshFailed.level, doneRefreshFailed.target) }, true))
+              .catch(() => undefined)
+          }
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="page with-action-bar">
-      <TopBar title="Fusionner des libellés" back={libraryHref(parentId)} />
-      <p className="crumbs">{parentId === ROOT_ID ? 'Bibliothèque' : nodePathLabel(tax, parentId)}</p>
+    <div className="page labels-v1 with-action-bar">
+      <TopBar title="Fusionner des libellés" eyebrow="Gestion des libellés" back={backTo} backLabel={backLabel} lead="Vérifiez les écritures, choisissez celle à conserver, puis confirmez." />
+      <p className="labels-scope">
+        {level && <strong>{LEVEL_PLURAL[level]}</strong>}
+        {level && ' · '}
+        {parentId === ROOT_ID ? 'Bibliothèque' : nodePathLabel(tax, parentId)}
+      </p>
 
       {kinds.size > 1 && level && (
         <Segmented
@@ -224,75 +303,90 @@ function MergeForm({ route, parentId }: { route: Route; parentId: string }) {
         <p className="notice">Ce niveau n'a pas de sous-niveau à fusionner.</p>
       ) : (
         <>
-          <section className="card-block">
-            <h3 className="label">1. {LEVEL_PLURAL[level]} à regrouper</h3>
+          <h2 className="field-label">1 · Libellés à regrouper</h2>
+          <ul className="labels-choices">
             {siblings.map((s) => {
               const similar = siblings.filter((o) => o !== s && similarLabels(o.label, s.label)).map((o) => o.label);
               return (
-                <label key={s.id} className="radio-row">
-                  <input type="checkbox" checked={selected.includes(s.label)} onChange={() => toggle(s.label)} />
-                  <span>
-                    « {s.label} » <span className="muted small">({plural(s.total, 'carte', 'cartes')})</span>
-                    {similar.length > 0 && <span className="muted small"> · semblable à {similar.map((x) => `« ${x} »`).join(', ')}</span>}
-                  </span>
-                </label>
+                <li key={s.id}>
+                  <label className="choice-row">
+                    <input type="checkbox" checked={selected.includes(s.label)} onChange={() => toggle(s.label)} />
+                    <span>
+                      <strong>{s.label}</strong>
+                      <small>
+                        {plural(s.total, 'carte', 'cartes')}
+                        {similar.length > 0 && ` · semblable à ${similar.map((x) => `« ${x} »`).join(', ')}`}
+                      </small>
+                    </span>
+                  </label>
+                </li>
               );
             })}
-          </section>
+          </ul>
 
           {chosen.length > 0 && (
-            <section className="card-block">
-              <h3 className="label">2. Libellé à conserver</h3>
-              {chosen.map((c) => (
-                <label key={c.id} className="radio-row">
-                  <input type="radio" name="target" checked={!useCustom && target === c.label} onChange={() => setPick({ custom: false, label: c.label })} />
-                  <span>« {c.label} »</span>
-                </label>
-              ))}
-              <label className="radio-row">
-                <input type="radio" name="target" checked={useCustom} onChange={() => setPick({ custom: true, label: null })} />
-                <span>Autre libellé :</span>
-              </label>
+            <>
+              <h2 className="field-label">2 · Libellé à conserver</h2>
+              <ul className="labels-choices">
+                {chosen.map((c) => (
+                  <li key={c.id}>
+                    <label className="choice-row">
+                      <input type="radio" name="target" checked={!useCustom && target === c.label} onChange={() => setPick({ custom: false, label: c.label })} />
+                      <span>
+                        <strong>{c.label}</strong>
+                      </span>
+                    </label>
+                  </li>
+                ))}
+                <li>
+                  <label className="choice-row">
+                    <input type="radio" name="target" checked={useCustom} onChange={() => setPick({ custom: true, label: null })} />
+                    <span>
+                      <strong>Créer un nouveau libellé</strong>
+                    </span>
+                  </label>
+                </li>
+              </ul>
               <input
                 className="input"
                 value={custom}
-                placeholder="Nouveau libellé"
+                placeholder="Nouveau nom"
                 aria-label="Nouveau libellé"
                 onChange={(e) => {
                   setPick({ custom: true, label: null });
                   setCustom(e.target.value);
                 }}
               />
-            </section>
+            </>
           )}
 
           {valid && (
-            <section className="card-block merge-preview" aria-live="polite">
-              <h3 className="label">3. Aperçu</h3>
-              <ul className="kv">
-                {chosen.map((c) => (
-                  <li key={c.id}>
-                    <span>« {c.label} »</span>
-                    <strong>{c.label === target ? `conservé (${c.total})` : `${c.total} → « ${target} »`}</strong>
-                  </li>
-                ))}
-                {targetNode && !chosen.includes(targetNode) && (
-                  <li>
-                    <span>« {target} » (existant)</span>
-                    <strong>{targetNode.total}</strong>
-                  </li>
-                )}
-              </ul>
-              <p className="small">
-                <strong>{plural(movedCards, 'carte sera reclassée', 'cartes seront reclassées')}</strong> sous « {target} »
-                {targetNode || chosen.some((c) => c.label === target) ? '' : ' (nouveau libellé)'}. Leurs identifiants, échéances et historiques sont
-                conservés ; leurs sous-niveaux sont regroupés sous « {target} ».
-              </p>
-              <p className="muted small">
-                La fusion est mémorisée et appliquée aux prochains imports. Elle ne s'annule pas automatiquement : les cartes réunies ne peuvent plus
-                être distinguées par leur ancien libellé.
-              </p>
-            </section>
+            <>
+              <h2 className="field-label">3 · Aperçu de la fusion</h2>
+              <section className="merge-preview-v1" aria-live="polite">
+                <p className="merge-big">{num(movedCards)}</p>
+                <p>
+                  {movedCards > 1 ? 'cartes seront déplacées' : 'carte sera déplacée'} sous « {target} »{isNew ? ' (nouveau libellé)' : ''}.
+                  {alreadyUnderTarget > 0 && ` ${plural(alreadyUnderTarget, 'carte est déjà classée', 'cartes sont déjà classées')} sous ce libellé et ne bougent pas.`} Leurs
+                  identifiants, l'historique et les échéances restent conservés.
+                </p>
+                <ul className="kv">
+                  {chosen.map((c) => (
+                    <li key={c.id}>
+                      <span>{c.label}</span>
+                      <strong>{c.label === target ? 'Conservé' : `→ ${target}`}</strong>
+                    </li>
+                  ))}
+                  {targetNode && !chosen.includes(targetNode) && (
+                    <li>
+                      <span>{target} (existant)</span>
+                      <strong>Conservé</strong>
+                    </li>
+                  )}
+                </ul>
+              </section>
+              <p className="muted small">Les nouvelles importations suivront également cette fusion. Cette opération ne s'annule pas automatiquement ; les sous-niveaux sont regroupés sous « {target} ».</p>
+            </>
           )}
         </>
       )}
@@ -300,10 +394,19 @@ function MergeForm({ route, parentId }: { route: Route; parentId: string }) {
       {message && (message.error ? <ErrorNotice message={message.text} /> : <p className="notice">{message.text}</p>)}
 
       <div className="action-bar">
-        <button type="button" className="btn primary block" disabled={!valid || busy} onClick={() => void confirm()}>
-          {busy ? 'Fusion…' : valid ? `Confirmer la fusion (${plural(movedCards, 'carte', 'cartes')})` : 'Choisissez au moins un libellé à remplacer'}
+        <button type="button" className="btn primary block" disabled={!valid || busy} onClick={() => setAsking(true)}>
+          {valid ? `Confirmer la fusion (${plural(movedCards, 'carte', 'cartes')})` : 'Choisissez au moins un libellé à remplacer'}
         </button>
       </div>
+
+      {asking && valid && (
+        <ConfirmDialog title="Confirmer la fusion ?" confirmLabel="Confirmer la fusion" busyLabel="Fusion…" busy={busy} onConfirm={() => void confirm()} onCancel={() => setAsking(false)}>
+          <p>
+            <strong>{plural(movedCards, 'carte', 'cartes')}</strong> {movedCards > 1 ? 'seront reclassées' : 'sera reclassée'} sous « {target} ». Leurs identifiants, leurs échéances et leur historique resteront inchangés.
+          </p>
+          <p className="muted small">Cette fusion sera également appliquée aux prochains imports.</p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }

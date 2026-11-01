@@ -1,13 +1,14 @@
 // Accès aux données. Toutes les écritures d'un import se font dans UNE transaction (tout ou rien).
-import type { Card, CardMeta, Collection, TestSession } from '../domain/types';
+import type { AnswerRecord, Card, CardMeta, Collection, ScopeSpec, TestSession } from '../domain/types';
 import { newId } from '../domain/text';
 import { applyRulesToDrafts, computeContentHash, type CardDraft } from '../imports/buildCards';
 import type { CardContent } from '../library/cardForm';
 import { planImport, type ImportPlan } from '../imports/importPlan';
 import { introducedFromLog, newRemainingToday, planReview, sameQueue, type ReviewPlan } from '../review/queue';
-import { applyRating, DEFAULT_NEW_PER_DAY, type ReviewLogEntry, type ReviewState } from '../review/schedule';
+import { applyFreeTest, applyRevision, DEFAULT_NEW_PER_DAY, type FreeSignal, type Rating, type ReviewLogEntry, type ReviewState } from '../review/schedule';
 import { addMergeRules, applyLabelRules, LABEL_RULES_KEY, type LabelLevel, type LabelRule } from '../taxonomy/labelMerge';
-import { buildTaxonomy, nodeDepth, nodeIdFor, pathKeyOf, ROOT_ID, scopeKeyBounds, segmentsOf } from '../taxonomy/tree';
+import { buildTaxonomy, nodeDepth, nodeIdFor, pathInScope, pathKeyOf, ROOT_ID, scopeKeyBounds, segmentsOf } from '../taxonomy/tree';
+import { effectiveStudied, parseStudied, STUDIED_KEY, studiedMetas, toStored, unitsFromHistory, type StudiedProgram } from '../program/studied';
 import { applyTestFilters, NO_FILTERS, resolveScope } from '../tests/selection';
 import { createSession, ratingOf, withDeadline } from '../tests/session';
 import type { DB } from './db';
@@ -245,6 +246,97 @@ export async function deleteCollection(db: DB, collectionId: string): Promise<nu
   await tx.objectStore('collections').delete(collectionId);
   await tx.done;
   return removed;
+}
+
+// ---------- Suppression ciblée multi-collections (v1.2) ----------
+
+/** Une collection concernée par une suppression ciblée */
+export interface DeletionTarget {
+  collectionId: string;
+  /** Vrai seulement si l'utilisatrice a choisi explicitement la collection entière (registre supprimé avec ses cartes) */
+  whole: boolean;
+  /** Identifiants de TOUTES les cartes de la collection tels qu'affichés à l'utilisatrice (instantané à valider) */
+  snapshot: readonly string[];
+  /** Cartes à supprimer (sélection partielle) ; ignoré si `whole` */
+  cardIds: readonly string[];
+  /**
+   * Classement affiché (pathKeyOf) de chaque carte de la collection au moment de la sélection. Pour une sélection
+   * partielle, la suppression est refusée si une carte a changé de matière, thème, leçon ou notion depuis : la sélection
+   * par thème ou par notion ne correspondrait plus au périmètre choisi.
+   */
+  paths?: Readonly<Record<string, string>>;
+}
+
+export type DeletionOutcome =
+  | { status: 'deleted'; cards: number; collections: number; wholeCollections: number }
+  /** La bibliothèque a changé depuis l'aperçu : rien n'a été supprimé, la sélection doit être vérifiée de nouveau */
+  | { status: 'changed'; reason: string };
+
+const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>) => a.size === b.size && [...a].every((x) => b.has(x));
+
+/**
+ * Supprime, en UNE transaction, les cartes désignées (par identifiant) de plusieurs collections, avec leurs états de
+ * mémorisation, et le registre des seules collections choisies en entier. L'instantané affiché est revalidé DANS la
+ * transaction avant toute écriture : toute divergence (carte ajoutée, supprimée, déplacée, collection disparue)
+ * annule tout. Historique (reviewLog), séances et réglages ne sont pas touchés. Une erreur annule l'ensemble.
+ * `onProgress` (tests) est appelé après chaque suppression de carte.
+ */
+export async function deleteSelection(db: DB, targets: readonly DeletionTarget[], onProgress?: (deleted: number) => void): Promise<DeletionOutcome> {
+  if (targets.length === 0) throw new Error('Aucune sélection à supprimer.');
+  const ids = targets.map((t) => t.collectionId);
+  if (new Set(ids).size !== ids.length) throw new Error('Une collection est désignée plusieurs fois.');
+  const tx = db.transaction(['cards', 'reviewStates', 'collections'], 'readwrite');
+  try {
+    const cards = tx.objectStore('cards');
+    const states = tx.objectStore('reviewStates');
+    const collections = tx.objectStore('collections');
+    const byCollection = cards.index('byCollection');
+    const bail = (reason: string): DeletionOutcome => {
+      tx.done.catch(() => undefined);
+      tx.abort();
+      return { status: 'changed', reason };
+    };
+    // 1. Validation complète, sans aucune écriture
+    const toDelete = new Set<string>();
+    let wholeCount = 0;
+    for (const t of targets) {
+      if (!(await collections.get(t.collectionId))) return bail('une collection a disparu');
+      const current = new Set((await byCollection.getAllKeys(IDBKeyRange.only(t.collectionId))) as string[]);
+      if (!sameSet(current, new Set(t.snapshot))) return bail('les cartes d’une collection ont changé');
+      if (!t.whole && t.paths) {
+        const paths = t.paths;
+        const inCollection = await byCollection.getAll(IDBKeyRange.only(t.collectionId));
+        if (inCollection.some((c) => paths[c.cardId] !== pathKeyOf(c))) return bail('le classement d’une carte a changé');
+      }
+      if (t.whole) {
+        wholeCount++;
+        for (const id of current) toDelete.add(id);
+      } else {
+        for (const id of t.cardIds) {
+          if (!current.has(id)) return bail('une carte sélectionnée n’est plus dans sa collection');
+          toDelete.add(id);
+        }
+      }
+    }
+    // 2. Écritures : cartes et états des seules cartes désignées, puis registre des collections choisies en entier
+    let n = 0;
+    for (const id of toDelete) {
+      await Promise.all([cards.delete(id), states.delete(id)]);
+      n++;
+      onProgress?.(n);
+    }
+    for (const t of targets) if (t.whole) await collections.delete(t.collectionId);
+    await tx.done;
+    return { status: 'deleted', cards: toDelete.size, collections: targets.length, wholeCollections: wholeCount };
+  } catch (err) {
+    tx.done.catch(() => undefined);
+    try {
+      tx.abort();
+    } catch {
+      // transaction déjà terminée ou annulée
+    }
+    throw err;
+  }
 }
 
 // ---------- Import ----------
@@ -565,51 +657,86 @@ export function newlyRated(stored: TestSession, next: TestSession): RatedEntry[]
   return out;
 }
 
+/** v1.2 : signal d'une réponse de test libre (QCM répondu, ou question ouverte autoévaluée) ; rien sinon. */
+export function freeSignalOf(a: AnswerRecord | undefined): FreeSignal | undefined {
+  if (!a || a.kind === 'deferred') return undefined;
+  return a.kind === 'mcq' ? { kind: 'mcq', correct: a.correct } : { kind: 'open', rating: a.selfEval };
+}
+
+/** v1.2 : réponses de test libre présentes dans `next` mais pas encore dans `stored`. */
+export function newlyAnswered(stored: TestSession, next: TestSession): { cardId: string; signal: FreeSignal }[] {
+  const out: { cardId: string; signal: FreeSignal }[] = [];
+  for (const id of next.cardIds) {
+    const sig = freeSignalOf(next.answers[id]);
+    if (sig && !freeSignalOf(stored.answers[id])) out.push({ cardId: id, signal: sig });
+  }
+  return out;
+}
+
 /**
- * Enregistre une transition de RÉVISION PROGRAMMÉE (lot 2), dans UNE transaction :
+ * Enregistre une transition de RÉVISION PROGRAMMÉE (lot 2) ou, depuis la v1.2, de TEST LIBRE, dans UNE transaction :
  *  - mêmes contrôles que saveSessionTransition (session en cours, révision attendue, sinon StaleSessionError) ;
- *  - pour chaque nouvelle évaluation du premier passage : nouvel état de mémorisation calculé à partir de l'état
- *    EN BASE (applyRating) + ligne d'historique ;
- *  - pour une reprise de fin de séance : ligne d'historique seulement (l'échéance J+1 reste acquise).
- * Tout ou rien : la session, l'état et l'historique ne peuvent pas diverger.
- * Une carte supprimée entre-temps n'obtient pas d'état (pas d'orphelin) ; l'évaluation reste historisée.
+ *  - révision : pour chaque nouvelle évaluation du premier passage, nouvel état calculé à partir de l'état EN BASE
+ *    (applyRevision) + ligne d'historique ; reprise de fin de séance : ligne d'historique seulement ;
+ *  - test libre : pour chaque nouvelle réponse, applyFreeTest ; si elle a un effet, nouvel état + ligne d'historique
+ *    marquée « libre » ; sinon rien ;
+ * Tout ou rien : la session, l'état et l'historique ne peuvent pas diverger. Une réponse n'est comparée qu'à la
+ * session enregistrée : une reprise, un rechargement ou un autre onglet ne peuvent pas l'appliquer deux fois.
+ * Une carte supprimée entre-temps n'obtient pas d'état (pas d'orphelin).
  */
-export async function saveRevisionTransition(db: DB, next: TestSession, today: string, nowIso: string = new Date().toISOString()): Promise<void> {
-  if (next.mode !== 'revision') throw new Error('Seule une révision programmée modifie les échéances.');
+export async function saveEvaluatedTransition(db: DB, next: TestSession, today: string, nowIso: string = new Date().toISOString()): Promise<void> {
+  const rev = next.mode === 'revision';
   const expected = sessionRevision(next) - 1;
   const tx = db.transaction(['sessions', 'reviewStates', 'reviewLog', 'cards'], 'readwrite');
   try {
     const sessions = tx.objectStore('sessions');
     const stored = await sessions.get(next.sessionId);
-    if (!stored) throw new StaleSessionError("Cette révision n'existe plus.");
+    // Messages identiques à ceux de saveSessionTransition (test libre) et de la révision du lot 2
+    if (!stored) throw new StaleSessionError(rev ? "Cette révision n'existe plus." : "Ce test n'existe plus.");
     if (stored.status === 'abandoned') {
-      throw new StaleSessionError('Cette révision a été remplacée par une autre séance, peut-être dans un autre onglet.');
+      throw new StaleSessionError(
+        rev ? 'Cette révision a été remplacée par une autre séance, peut-être dans un autre onglet.' : 'Ce test a été remplacé par un nouveau test, peut-être dans un autre onglet.',
+      );
     }
-    if (stored.status !== 'in_progress') throw new StaleSessionError('Cette révision a déjà été terminée, peut-être dans un autre onglet.');
-    if (sessionRevision(stored) !== expected) throw new StaleSessionError('Cette révision a été modifiée dans un autre onglet.');
+    if (stored.status !== 'in_progress')
+      throw new StaleSessionError(rev ? 'Cette révision a déjà été terminée, peut-être dans un autre onglet.' : 'Ce test a déjà été terminé, peut-être dans un autre onglet.');
+    if (sessionRevision(stored) !== expected)
+      throw new StaleSessionError(rev ? 'Cette révision a été modifiée dans un autre onglet.' : 'Ce test a été modifié dans un autre onglet.');
 
     const states = tx.objectStore('reviewStates');
     const log = tx.objectStore('reviewLog');
     const ops: Promise<unknown>[] = [];
-    for (const r of newlyRated(stored, next)) {
-      const prev = await states.get(r.cardId);
-      const exists = (await tx.objectStore('cards').count(r.cardId)) > 0;
-      const after = r.repeat ? prev : applyRating(prev, r.cardId, r.rating, today, nowIso);
-      if (!r.repeat && after && exists) ops.push(guard(states.put(after)));
-      const entry: ReviewLogEntry = {
-        logId: newId(),
-        cardId: r.cardId,
-        sessionId: next.sessionId,
-        at: nowIso,
-        day: today,
-        rating: r.rating,
-        repeat: r.repeat,
-        ...(r.correct !== undefined ? { correct: r.correct } : {}),
-        ...(prev ? { previousDueDay: prev.dueDay } : {}),
-        intervalDays: after?.intervalDays ?? 0,
-        dueDay: after?.dueDay ?? today,
-      };
-      ops.push(guard(log.add(entry)));
+    const entryOf = (cardId: string, rating: Rating, correct: boolean | undefined, repeat: boolean, prev: ReviewState | undefined, after: ReviewState | undefined): ReviewLogEntry => ({
+      logId: newId(),
+      cardId,
+      sessionId: next.sessionId,
+      at: nowIso,
+      day: today,
+      rating,
+      repeat,
+      ...(next.mode === 'libre' ? { mode: 'libre' as const } : {}),
+      ...(correct !== undefined ? { correct } : {}),
+      ...(prev ? { previousDueDay: prev.dueDay } : {}),
+      intervalDays: after?.intervalDays ?? 0,
+      dueDay: after?.dueDay ?? today,
+    });
+    if (next.mode === 'revision') {
+      for (const r of newlyRated(stored, next)) {
+        const prev = await states.get(r.cardId);
+        const exists = (await tx.objectStore('cards').count(r.cardId)) > 0;
+        const after = r.repeat ? prev : applyRevision(prev, r.cardId, r.rating, today, nowIso);
+        if (!r.repeat && after && exists) ops.push(guard(states.put(after)));
+        ops.push(guard(log.add(entryOf(r.cardId, r.rating, r.correct, r.repeat, prev, after))));
+      }
+    } else {
+      for (const r of newlyAnswered(stored, next)) {
+        if ((await tx.objectStore('cards').count(r.cardId)) === 0) continue;
+        const prev = await states.get(r.cardId);
+        const after = applyFreeTest(prev, r.cardId, r.signal, today, nowIso);
+        if (!after) continue; // sans effet sur la mémorisation
+        ops.push(guard(states.put(after)));
+        ops.push(guard(log.add(entryOf(r.cardId, after.lastRating, r.signal.kind === 'mcq' ? r.signal.correct : undefined, false, prev, after))));
+      }
     }
     ops.push(guard(sessions.put(stripUndefined(next))));
     await Promise.all([...ops, tx.done]);
@@ -622,6 +749,12 @@ export async function saveRevisionTransition(db: DB, next: TestSession, today: s
     }
     throw err;
   }
+}
+
+/** Révision programmée (lot 2) : alias conservé de saveEvaluatedTransition. */
+export async function saveRevisionTransition(db: DB, next: TestSession, today: string, nowIso: string = new Date().toISOString()): Promise<void> {
+  if (next.mode !== 'revision') throw new Error('Seule une révision programmée modifie les échéances par cette fonction.');
+  return saveEvaluatedTransition(db, next, today, nowIso);
 }
 
 /** Séance en cours, telle que présentée à l'utilisatrice avant confirmation de son remplacement */
@@ -700,6 +833,8 @@ export async function startReviewSession(
   db: DB,
   req: {
     nodeId: string;
+    /** v1.1.0 : révision personnalisée sur plusieurs niveaux (sinon : le niveau `nodeId`) */
+    scope?: Extract<ScopeSpec, { kind: 'node' | 'multi' }>;
     scopeLabel: string;
     expectedQueue: readonly string[];
     /** Identifiants des séances en cours dont le remplacement a été confirmé */
@@ -718,13 +853,28 @@ export async function startReviewSession(
       return { status: 'conflict', running: running.map(runningInfo) };
     }
 
-    const [scoped, stateList, dayLog, setting] = await Promise.all([
-      scopedMetasInTx(tx.objectStore('cards'), tx.objectStore('collections'), req.nodeId),
+    const scope = req.scope ?? { kind: 'node' as const, nodeId: req.nodeId };
+    const [inScope, stateList, dayLog, setting, studiedRec, rulesRec] = await Promise.all([
+      scope.kind === 'node'
+        ? scopedMetasInTx(tx.objectStore('cards'), tx.objectStore('collections'), scope.nodeId)
+        : scopedMetasInTx(tx.objectStore('cards'), tx.objectStore('collections'), ROOT_ID).then((all) =>
+            all.filter((m) => scope.nodeIds.some((id) => pathInScope(pathKeyOf(m), id))),
+          ),
       tx.objectStore('reviewStates').getAll(),
       tx.objectStore('reviewLog').index('byDay').getAll(req.today),
       tx.objectStore('settings').get(NEW_PER_DAY_KEY),
+      tx.objectStore('settings').get(STUDIED_KEY),
+      tx.objectStore('settings').get(LABEL_RULES_KEY),
     ]);
     const states = new Map(stateList.map((st) => [st.cardId, st]));
+    // v1.1.0 : seules les cartes du programme étudié sont éligibles (relu dans la transaction, comme le reste)
+    const rules = Array.isArray(rulesRec?.value) ? (rulesRec.value as LabelRule[]) : [];
+    let reviewed = (id: string) => states.has(id);
+    if (!parseStudied(studiedRec?.value)) {
+      const logged = new Set((await tx.objectStore('reviewLog').getAll()).map((l) => l.cardId));
+      reviewed = (id: string) => states.has(id) || logged.has(id);
+    }
+    const scoped = studiedMetas(inScope, effectiveStudied(studiedRec?.value, inScope, reviewed, rules));
     const rawPerDay = setting?.value;
     const newPerDay = typeof rawPerDay === 'number' && Number.isFinite(rawPerDay) && rawPerDay >= 0 ? Math.floor(rawPerDay) : DEFAULT_NEW_PER_DAY;
     const plan = planReview(scoped, states, req.today, newRemainingToday(introducedFromLog(dayLog, req.today), newPerDay));
@@ -742,9 +892,10 @@ export async function startReviewSession(
       return { status: 'empty', plan };
     }
     const session = createSession(
-      { kind: 'node', nodeId: req.nodeId },
+      scope,
       `Révision — ${req.scopeLabel}`,
-      { count: null, format: 'all', order: 'library' },
+      // v1.2 : chronomètre automatique, 1 minute par carte prévue (non bloquant, pause possible)
+      { count: null, format: 'all', order: 'library', timer: { mode: 'elapsed', budgetSec: plan.queue.length * 60 } },
       plan.queue,
       now,
       'revision',
@@ -952,4 +1103,56 @@ export async function getSetting<T>(db: DB, key: string, fallback: T): Promise<T
 
 export async function setSetting(db: DB, key: string, value: unknown): Promise<void> {
   await db.put('settings', { key, value });
+}
+
+// ---------- v1.1.0 : programme étudié ----------
+
+/** Valeur enregistrée du programme étudié (null : jamais enregistré). */
+export async function getStudiedProgram(db: DB): Promise<StudiedProgram | null> {
+  return parseStudied((await db.get('settings', STUDIED_KEY))?.value);
+}
+
+/**
+ * Garantit qu'un programme est enregistré. Bibliothèque antérieure à la v1.1.0, ou restaurée depuis une ancienne
+ * sauvegarde : il est déduit, une seule fois, de l'historique réel de révision (unités contenant une carte déjà
+ * révisée). Bibliothèque neuve : programme vide. Lecture et écriture dans une même transaction.
+ */
+export async function ensureStudiedProgram(db: DB, now = new Date().toISOString()): Promise<StudiedProgram> {
+  const tx = db.transaction(['settings', 'reviewStates', 'reviewLog', 'cards'], 'readwrite');
+  const current = parseStudied((await tx.objectStore('settings').get(STUDIED_KEY))?.value);
+  if (current) {
+    await tx.done;
+    return current;
+  }
+  const [stateKeys, log, cards] = await Promise.all([
+    tx.objectStore('reviewStates').getAllKeys(),
+    tx.objectStore('reviewLog').getAll(),
+    tx.objectStore('cards').getAll(),
+  ]);
+  const reviewed = new Set<string>([...stateKeys.map(String), ...log.map((l) => l.cardId)]);
+  const value = toStored(new Set(unitsFromHistory(cards.map(toMeta), (id) => reviewed.has(id))), now, 'history');
+  await Promise.all([tx.objectStore('settings').put({ key: STUDIED_KEY, value }), tx.done]);
+  return value;
+}
+
+export async function saveStudiedProgram(db: DB, units: ReadonlySet<string>, now = new Date().toISOString()): Promise<StudiedProgram> {
+  const value = toStored(units, now);
+  await setSetting(db, STUDIED_KEY, value);
+  return value;
+}
+
+// ---------- Refonte UX/UI : régularité (lecture seule) ----------
+
+/**
+ * Jours locaux (AAAA-MM-JJ) comportant au moins une évaluation de révision programmée (historique reviewLog).
+ * v1.2 : les évaluations de test libre (mode « libre ») ne comptent pas (arbitrage 4 de la refonte).
+ */
+export async function listReviewDays(db: DB): Promise<Set<string>> {
+  const days = new Set<string>();
+  let cursor = await db.transaction('reviewLog').store.index('byDay').openCursor();
+  while (cursor) {
+    if (cursor.value.mode !== 'libre') days.add(cursor.value.day);
+    cursor = await cursor.continue();
+  }
+  return days;
 }

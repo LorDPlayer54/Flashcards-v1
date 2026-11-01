@@ -182,6 +182,8 @@ export function currentScope(scope: ScopeSpec, tax: Taxonomy, rules: readonly La
 export function currentScopeLabel(session: Pick<TestSession, 'scope' | 'scopeLabel' | 'mode'>, tax: Taxonomy, rules: readonly LabelRule[]): string {
   const scope = currentScope(session.scope, tax, rules);
   const prefix = session.mode === 'revision' ? 'Révision — ' : '';
+  // v1.1.0 : la révision du jour porte sur le programme étudié (périmètre racine) : libellé enregistré au lancement
+  if (session.mode === 'revision' && scope.kind === 'node' && scope.nodeId === ROOT_ID && session.scopeLabel) return session.scopeLabel;
   if (scope.kind === 'node' && tax.byId.has(scope.nodeId)) return prefix + nodePathLabel(tax, scope.nodeId);
   if (scope.kind === 'multi' && scope.nodeIds.every((id) => tax.byId.has(id))) {
     const labels = scope.nodeIds.map((id) => nodePathLabel(tax, id));

@@ -13,6 +13,7 @@ import { buildTaxonomy, nodeIdFor, pathInScope, pathKeyOf, ROOT_ID } from '../ta
 import { resolveScope } from '../tests/selection';
 import { createSession, recordAnswer, selfEvaluate } from '../tests/session';
 import { newRemainingToday, planReview } from './queue';
+import { startReviewAllStudied } from '../tests/studyAll';
 
 const D = '2026-10-30';
 const NOW = '2026-10-30T09:00:00.000Z';
@@ -28,7 +29,7 @@ async function preview(db: DB, nodeId: string) {
   return planReview(resolveScope({ kind: 'node', nodeId }, tax, metas), states, D, remaining);
 }
 const launch = (db: DB, nodeId: string, expectedQueue: readonly string[], confirmedReplace: readonly string[] = []) =>
-  repo.startReviewSession(db, { nodeId, scopeLabel: 'x', expectedQueue, confirmedReplace, today: D, now: NOW });
+  startReviewAllStudied(db, { nodeId, scopeLabel: 'x', expectedQueue, confirmedReplace, today: D, now: NOW });
 const libre = (ids: string[]) => createSession({ kind: 'node', nodeId: ROOT_ID }, 'Test', { count: ids.length, format: 'all', order: 'library' }, ids, NOW);
 const macro = nodeIdFor([
   { kind: 'matiere', label: 'Économie' },

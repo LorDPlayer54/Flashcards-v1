@@ -1,6 +1,46 @@
-# Flashcards — version 1.0.0
+# Flashcard — version 1.2.0
 
-Version stable, candidate à la mise en service. Elle reprend l'ensemble des lots 1 à 4 et les corrections de la v0.4.1, sans changement de fonctionnalité. L'historique des lots figure plus bas.
+## Évolutions fonctionnelles après la refonte (branche `refonte-uxui`)
+
+Les tests libres alimentent désormais la répétition espacée, avec des règles prudentes (échecs pris en compte immédiatement, réussites seulement près de l'échéance, une évaluation par carte et par jour) ; chronomètre automatique et non bloquant en révision (1 minute par carte) ; bouton « Suivant » après l'autoévaluation ; barre du navigateur accordée au thème effectif. Règles détaillées dans `src/review/schedule.ts` et `docs/GUIDE_UTILISATEUR.md`, section 10.
+
+## Nouveautés de la version 1.2.0
+
+- Nom affiché : **Flashcard** (interface, onglet, manifeste PWA, messages, guide). Les identifiants techniques sont inchangés : base IndexedDB `flashcards-ena`, clés de stockage, cache du service worker, `id`/`scope`/`start_url` du manifeste, format des sauvegardes. Une installation existante est mise à jour sans perte de données ; le nom sous l'icône peut ne changer qu'après réinstallation selon le système.
+- Recherche V1 : présentation compacte, extraits contextuels et surlignage des termes (rendu en texte, sans HTML injecté).
+- Libellés V1 : recherche dans les suggestions et les règles, fusion en trois étapes avec confirmation, oubli d'une règle confirmé.
+- Plus › Tests libres : un interrupteur « Corriger après chaque question » ; l'ancien choix « Comme le dernier test » est converti une fois en préférence explicite.
+- Édition d'une carte : bouton « Annuler », confirmation d'abandon si des modifications existent, retour stable sans boucle vers le formulaire.
+- Suppression ciblée : refus si une carte a été reclassée entre la sélection et la confirmation.
+
+## Publication (GitHub Pages)
+
+Le workflow `.github/workflows/deploy.yml` publie à chaque envoi sur la branche **`main`** (ou à la demande depuis l'onglet Actions). Le dépôt local livré n'a pas de dépôt distant et contient `master` (1.1.0) et `refonte-uxui` (1.2.0) : procédure complète dans `docs/PASSATION_FINALE_1.2.0.md`. Rien n'est publié tant que cet envoi n'a pas été fait.
+
+## Refonte de l'interface (branche `refonte-uxui`)
+
+Nouvelle présentation de tous les écrans selon les maquettes validées (Accueil V5, Bibliothèque V1, Mon programme étudié V2, Réviser V3, états des cartes V1, Test libre V3, Statistiques V6, Plus V2, import CSV avec correspondance des colonnes repliable), police Manrope intégrée (licence OFL, `src/assets/fonts/`). Les mécanismes métier, les données enregistrées et le format des sauvegardes sont inchangés ; seul ajout fonctionnel : le nom du fichier de sauvegarde est personnalisable. Voir `docs/GUIDE_UTILISATEUR.md`, section 9.
+
+
+Version 1.1.0 : programme étudié et deux parcours de révision programmée. Elle s'appuie sur la v1.0.0 (lots 1 à 4 et corrections de la v0.4.1). L'historique des versions figure plus bas.
+
+## Nouveautés de la version 1.1.0
+
+- **Mon programme étudié** (Bibliothèque › « Mon programme étudié », ou Plus) : l'utilisatrice coche une fois les matières, thèmes, leçons et notions déjà étudiés en cours, puis met la liste à jour au fil de l'année. Seules ces notions alimentent la révision programmée. Étudié ne veut pas dire maîtrisé : les cartes jamais vues d'une notion cochée entrent progressivement en révision, selon le quota de nouvelles cartes du jour. Décocher une notion n'efface aucune progression : ses cartes ne sont simplement plus proposées.
+- **Deux parcours dans Réviser** : « Révision du jour » (par défaut), sur tout le programme étudié, sans sélection ; « Personnalisée », sur un ou plusieurs niveaux choisis parmi le programme étudié, toutes matières confondues. Aperçu : cartes en retard, à revoir aujourd'hui, nouvelles, total. Les deux parcours partagent la même progression et le même quota de nouvelles cartes ; l'algorithme de répétition espacée est inchangé.
+- **Statistiques** : bloc « Programme étudié » (cartes de la bibliothèque, du programme, déjà révisées, à réviser aujourd'hui). La tuile « étudiées » devient « déjà révisées », pour ne pas la confondre avec le programme étudié.
+- **Inchangés** : tests libres (toute la bibliothèque, sans effet sur les échéances), import CSV, bibliothèque, sauvegardes (le programme y est inclus automatiquement).
+
+Règles retenues :
+
+1. Unité du programme : le niveau le plus précis de chaque carte. Les cartes sans notion forment une ligne « Cartes sans notion » sous leur thème ou leur leçon.
+2. Cocher un niveau coche les notions présentes à ce moment-là. Une notion importée ensuite reste non étudiée, même sous un niveau coché. Une carte ajoutée à une notion déjà étudiée suit le statut de la notion.
+3. Bibliothèque antérieure à la v1.1.0, ou restauration d'une sauvegarde antérieure : à la première ouverture, les notions qui contiennent au moins une carte déjà révisée sont cochées automatiquement, une seule fois. Les autres restent à cocher.
+4. Fusion ou renommage de libellés : les choix suivent le nouveau libellé. Une notion issue de la fusion de notions de statuts différents est étudiée dès que l'une d'elles l'était.
+5. Notion décochée pendant une révision en cours ou en pause : la séance se poursuit telle quelle, sans perte de réponse. Le changement vaut pour les séances suivantes.
+6. Aucune notion cochée : la révision programmée est vide, et l'écran Réviser renvoie vers « Mon programme étudié ».
+
+Stockage : nouvelle clé de réglage `studiedProgram` (`{ units, updatedAt, origin }`). Le schéma IndexedDB reste en version 3 et le format de sauvegarde en version 3. La valeur est contrôlée à la restauration.
 
 ## Pour commencer
 
@@ -11,6 +51,7 @@ Version stable, candidate à la mise en service. Elle reprend l'ensemble des lot
 | Publier sur GitHub Pages | `docs/DEPLOIEMENT.md` § 3 |
 | Installer l'application sur iPhone ou Android | `docs/GUIDE_UTILISATEUR.md` § 1 |
 | Sauvegarder et restaurer les données | `docs/GUIDE_UTILISATEUR.md` § 3 et § 4 |
+| Définir son programme étudié, réviser | `docs/GUIDE_UTILISATEUR.md` § 8 |
 
 L'archive de livraison contient aussi `dist/`, la version de production déjà compilée : ce dossier peut être copié tel quel sur un hébergement statique HTTPS (`docs/DEPLOIEMENT.md` § 4). Pour GitHub Pages, la publication automatique reconstruit `dist/` elle-même.
 
@@ -266,7 +307,7 @@ npm install
 npm test
 ```
 
-**Résultat attendu** : `Tests  285 passed | 1 skipped (286)`. Le test ignoré est celui du vrai CSV (voir étape 4 bis).
+**Résultat attendu** : `Tests  306 passed | 1 skipped (307)`. Le test ignoré est celui du vrai CSV (voir étape 4 bis).
 
 #### 4 bis. Tester avec votre vrai fichier de 500 cartes (facultatif)
 
@@ -274,14 +315,14 @@ Remplacez le chemin par celui de votre fichier :
 
 - Windows (PowerShell) :
   ```
-  $env:REF_CSV="C:\Users\VOUS\Documents\Flashcards_ENA_Calcul_Raisonnement_500.csv"; npm test
+  $env:REF_CSV="C:\Users\VOUS\Documents\mon_fichier_de_reference.csv"; npm test
   ```
 - Mac :
   ```
-  REF_CSV="$HOME/Documents/Flashcards_ENA_Calcul_Raisonnement_500.csv" npm test
+  REF_CSV="$HOME/Documents/mon_fichier_de_reference.csv" npm test
   ```
 
-**Résultat attendu** : `Tests  286 passed (286)` — ce test vérifie 500 cartes, 300 Calcul, 200 Raisonnement, 178 QCM, 322 ouvertes, 25 thèmes et des réponses intactes.
+**Résultat attendu** : `Tests  307 passed (307)` — ce test vérifie 500 cartes, 300 Calcul, 200 Raisonnement, 178 QCM, 322 ouvertes, 25 thèmes et des réponses intactes.
 
 ### 5. Ouvrir l'application sur l'ordinateur
 

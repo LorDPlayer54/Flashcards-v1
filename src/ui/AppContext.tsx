@@ -3,7 +3,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import type { CardMeta, Collection, ScopeSpec, TestConfig } from '../domain/types';
 import { dataReplacedPhase, subscribeDataReplaced } from '../backup/channel';
 import { openFlashcardsDb, type DB } from '../storage/db';
-import { getLabelRules, getSetting, listCollections, loadAllMeta, setSetting } from '../storage/repo';
+import { ensureStudiedProgram, getLabelRules, getSetting, getStudiedProgram, listCollections, loadAllMeta, saveStudiedProgram, setSetting } from '../storage/repo';
+import { normalizeUnits, studiedMetas } from '../program/studied';
 import type { LabelRule } from '../taxonomy/labelMerge';
 import { APPEARANCE_KEY, applyAppearance, cacheAppearance, DEFAULT_APPEARANCE, parseAppearance, type Appearance } from '../settings/preferences';
 import { buildTaxonomy, type Taxonomy } from '../taxonomy/tree';
@@ -14,6 +15,9 @@ interface LibraryState {
   collections: Collection[];
   /** Lot 4 : fusions de libellés mémorisées (affichage des périmètres renommés depuis une séance) */
   labelRules: LabelRule[];
+  /** v1.1.0 : unités du programme étudié (libellés actuels) et cartes correspondantes */
+  studiedUnits: Set<string>;
+  studied: CardMeta[];
 }
 
 interface AppContextValue extends LibraryState {
@@ -29,6 +33,8 @@ interface AppContextValue extends LibraryState {
   /** Lot 3B : thème et taille du texte (appliqués immédiatement, enregistrés dans la base) */
   appearance: Appearance;
   setAppearance: (a: Appearance) => Promise<void>;
+  /** v1.1.0 : enregistre le programme étudié (écrit d'abord, affichage ensuite) */
+  setStudiedUnits: (units: ReadonlySet<string>) => Promise<void>;
 }
 
 const Ctx = createContext<AppContextValue | null>(null);
@@ -39,9 +45,16 @@ export function useApp(): AppContextValue {
   return v;
 }
 
+function withStudied(base: Omit<LibraryState, 'studiedUnits' | 'studied'>, units: Iterable<string>): LibraryState {
+  const studiedUnits = normalizeUnits(units, base.labelRules);
+  return { ...base, studiedUnits, studied: studiedMetas(base.metas, studiedUnits) };
+}
+
 async function loadLibrary(db: DB): Promise<LibraryState> {
   const [metas, collections, labelRules] = await Promise.all([loadAllMeta(db), listCollections(db), getLabelRules(db).catch(() => [])]);
-  return { metas, tax: buildTaxonomy(metas), collections, labelRules };
+  // v1.1.0 : programme étudié (déduit une fois de l'historique pour une bibliothèque antérieure)
+  const program = await ensureStudiedProgram(db).catch(() => getStudiedProgram(db).catch(() => null));
+  return withStudied({ metas, tax: buildTaxonomy(metas), collections, labelRules }, program?.units ?? []);
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -102,9 +115,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [db],
   );
 
+  const setStudiedUnits = useCallback(
+    async (units: ReadonlySet<string>) => {
+      if (!db) return;
+      const saved = await saveStudiedProgram(db, units);
+      setLib((cur) => (cur ? withStudied(cur, saved.units) : cur));
+    },
+    [db],
+  );
+
   const value = useMemo<AppContextValue | null>(
-    () => (db && lib ? { db, ...lib, reload, pendingScope, setPendingScope, pendingConfig, setPendingConfig, appearance, setAppearance } : null),
-    [db, lib, reload, pendingScope, pendingConfig, appearance, setAppearance],
+    () =>
+      db && lib
+        ? { db, ...lib, reload, pendingScope, setPendingScope, pendingConfig, setPendingConfig, appearance, setAppearance, setStudiedUnits }
+        : null,
+    [db, lib, reload, pendingScope, pendingConfig, appearance, setAppearance, setStudiedUnits],
   );
 
   if (error) {

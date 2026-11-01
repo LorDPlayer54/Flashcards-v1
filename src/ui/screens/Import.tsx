@@ -43,6 +43,9 @@ export function Import() {
   const { db, collections, reload } = useApp();
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [current, setCurrent] = useState(0);
+  // Refonte (CSV-MAP-01) : « Correspondance des colonnes » repliée par défaut, état d'affichage uniquement
+  const [mapOpen, setMapOpen] = useState(false);
+  const mapToggle = useRef<HTMLButtonElement>(null);
   const [step, setStep] = useState<Step>('pick');
 
   // Configuration du fichier courant
@@ -72,6 +75,7 @@ export function Import() {
 
   const prepareFile = (f: QueuedFile | undefined) => {
     gate.current.invalidate();
+    setMapOpen(false);
     setAnalysis(null);
     setAnalysing(false);
     setOutcome(null);
@@ -325,31 +329,61 @@ export function Import() {
           )}
         </section>
 
-        <section className="field">
-          <h3 className="label">Correspondance des colonnes</h3>
-          {TARGET_FIELDS.filter((f) => !f.advanced).map((f) => fieldSelect(f.field, f.label, f.required))}
-          <details className="advanced">
-            <summary>Options de QCM dans des colonnes séparées</summary>
-            {TARGET_FIELDS.filter((f) => f.advanced).map((f) => fieldSelect(f.field, f.label))}
-          </details>
-        </section>
-
-        <section className="field">
-          <h3 className="label">Valeurs pour tout le fichier (facultatif)</h3>
-          <p className="muted small">Utilisées seulement quand la colonne est absente ou vide. Rien n'est déduit du texte des questions.</p>
-          {(['matiere', 'theme', 'lecon'] as const).map((k) => (
-            <label key={k} className="map-row">
-              <span className="map-label">{k === 'matiere' ? 'Matière' : k === 'theme' ? 'Thème' : 'Leçon'}</span>
-              <input className="input" value={fixed[k] ?? ''} onChange={(e) => setFixed((f) => ({ ...f, [k]: e.target.value }))} />
-            </label>
-          ))}
+        {/* CSV-MAP-01 : détail replié par défaut ; les champs restent montés (valeurs conservées), masqués par `hidden` */}
+        <section className="disclosure">
+          <button
+            ref={mapToggle}
+            type="button"
+            className="disclosure-head"
+            aria-expanded={mapOpen}
+            aria-controls="column-mapping"
+            onClick={() => setMapOpen((o) => !o)}
+          >
+            <span>
+              <span className="disclosure-title">Correspondance des colonnes</span>
+              <span className="disclosure-sub">
+                {plural(parsed.headers.length, 'colonne détectée', 'colonnes détectées')} ·{' '}
+                {plural(Object.values(mapping).filter((v) => v !== undefined).length, 'champ associé', 'champs associés')}
+              </span>
+            </span>
+            <svg className="chev-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          <div id="column-mapping" className="disclosure-body" hidden={!mapOpen}>
+            {TARGET_FIELDS.filter((f) => !f.advanced).map((f) => fieldSelect(f.field, f.label, f.required))}
+            <details className="advanced">
+              <summary>Options de QCM dans des colonnes séparées</summary>
+              {TARGET_FIELDS.filter((f) => f.advanced).map((f) => fieldSelect(f.field, f.label))}
+            </details>
+            <h3 className="label">Valeurs pour tout le fichier (facultatif)</h3>
+            <p className="muted small">Utilisées seulement quand la colonne est absente ou vide. Rien n'est déduit du texte des questions.</p>
+            {(['matiere', 'theme', 'lecon'] as const).map((k) => (
+              <label key={k} className="map-row">
+                <span className="map-label">{k === 'matiere' ? 'Matière' : k === 'theme' ? 'Thème' : 'Leçon'}</span>
+                <input className="input" value={fixed[k] ?? ''} onChange={(e) => setFixed((f) => ({ ...f, [k]: e.target.value }))} />
+              </label>
+            ))}
+          </div>
         </section>
 
         {problems.length > 0 && (
-          <section className="notice error">
+          <section className="notice error" role="alert">
             {problems.map((p, i) => (
               <p key={i}>{p.message}</p>
             ))}
+            {!mapOpen && (
+              <button
+                type="button"
+                className="btn secondary small"
+                onClick={() => {
+                  setMapOpen(true);
+                  mapToggle.current?.focus();
+                }}
+              >
+                Vérifier les colonnes
+              </button>
+            )}
           </section>
         )}
         {error && <p className="notice error">{error}</p>}

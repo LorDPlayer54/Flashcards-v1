@@ -214,7 +214,8 @@ export function remainingMs(s: TestSession, extraMs = 0, nowMs: number = Date.no
  * temps limité en mode entraînement (`timer.pausable`). Jamais en simulation d'examen ni en révision programmée.
  */
 export function canPause(s: TestSession): boolean {
-  if (s.mode !== 'libre' || s.status !== 'in_progress' || s.phase === 'correction' || s.pausedAt) return false;
+  // v1.2 : la révision programmée (chronomètre automatique « temps écoulé ») peut aussi être mise en pause
+  if (s.status !== 'in_progress' || s.phase === 'correction' || s.pausedAt) return false;
   const t = s.config.timer;
   if (!t) return false;
   return t.mode === 'elapsed' || (t.mode === 'limit' && t.pausable === true && Boolean(s.deadlineAt));
